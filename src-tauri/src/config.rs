@@ -144,6 +144,12 @@ pub struct Config {
     #[serde(default)]
     pub cerebras_model: String,
 
+    /// Optional Google Gemini API key. When set, dictations in Bengali
+    /// (`bn-IN` or `bn-IN-tech`) use Google's `gemini-3.5-transcribe` engine
+    /// in single-pass SMART mode with custom vocabulary biasing.
+    #[serde(default)]
+    pub gemini_api_key: String,
+
     #[serde(default = "default_min_seconds")]
     pub min_recording_seconds: f32,
 
@@ -583,6 +589,7 @@ impl Default for Config {
             chat_model: default_chat_model(),
             cerebras_api_key: String::new(),
             cerebras_model: String::new(),
+            gemini_api_key: String::new(),
             min_recording_seconds: default_min_seconds(),
             privacy_acknowledged: default_privacy_ack(),
             linux_hotkey_migrated: false,
@@ -659,6 +666,12 @@ impl Config {
     /// [crate::groq::chat_endpoint]. Whisper STT still runs on Groq.
     pub fn has_cerebras_key(&self) -> bool {
         !self.cerebras_api_key.trim().is_empty()
+    }
+
+    /// True when a Google Gemini API key is configured. Required for
+    /// `bn-IN` / `bn-IN-tech` dictation via `gemini-3.5-transcribe`.
+    pub fn has_gemini_key(&self) -> bool {
+        !self.gemini_api_key.trim().is_empty()
     }
 }
 

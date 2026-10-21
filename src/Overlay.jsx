@@ -10,6 +10,8 @@ const LANGUAGES = [
   { code: "auto", label: "Auto-detect" },
   { code: "en", label: "English" },
   { code: "hi", label: "Hindi" },
+  { code: "bn-IN", label: "Bengali (বাংলা)" },
+  { code: "bn-IN-tech", label: "Bengali - Coding (বাংলিশ)" },
   { code: "es", label: "Spanish" },
   { code: "fr", label: "French" },
   { code: "de", label: "German" },

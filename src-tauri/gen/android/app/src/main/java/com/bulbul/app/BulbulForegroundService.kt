@@ -177,8 +177,21 @@ class BulbulForegroundService : Service() {
     private fun processCapturedAudio(wav: ByteArray) {
         val appPkg = pendingAppPackage
         thread(name = "BulbulTranscribe", isDaemon = true) {
+            val lang = BulbulConfig.language(this)
+            val isBengaliGemini = lang == "bn-IN" || lang == "bn-IN-tech"
+            val isCoding = lang == "bn-IN-tech"
             val apiKey = getApiKey()
-            val transcript = if (apiKey.isNotBlank()) {
+            val geminiKey = getGeminiApiKey()
+
+            val transcript = if (isBengaliGemini) {
+                if (geminiKey.isNotBlank()) {
+                    val vocab = BulbulConfig.dictionaryWords(this)
+                    GeminiClient.transcribe(geminiKey, wav, vocab, isCoding)
+                } else {
+                    Log.w(TAG, "no Gemini API key set for Bengali dictation")
+                    null
+                }
+            } else if (apiKey.isNotBlank()) {
                 GroqClient.transcribe(apiKey, wav)
             } else null
 
@@ -186,14 +199,14 @@ class BulbulForegroundService : Service() {
                 val friendly = friendlyAppName(appPkg)
                 val mode = BulbulConfig.mode(this)
 
-                // AI cleanup — the Android port of desktop's groq::cleanup.
-                // Mode-aware (raw skips the LLM); on any failure or a tripped
-                // guard it falls back to the raw transcript so words are never
-                // lost. Runs BEFORE the deterministic dictionary/snippet passes,
-                // same order as desktop. The cleanup prompt carries the per-app
-                // style + venue hints, so the old deterministic AppStyle pass is
-                // gone — the LLM handles tone now, exactly like desktop.
-                val cleaned = Cleanup.clean(this, apiKey, transcript, mode, appPkg, friendly)
+                // AI cleanup: Gemini 3.5 Transcribe in SMART mode formats, punctuates,
+                // and strips disfluencies in a single pass. We bypass Cleanup.clean()
+                // for Bengali dictations while keeping it for standard Groq languages.
+                val cleaned = if (isBengaliGemini) {
+                    transcript
+                } else {
+                    Cleanup.clean(this, apiKey, transcript, mode, appPkg, friendly)
+                }
 
                 // Apply the user's dictionary (whole-word substitutions) then
                 // expand snippets — same order as desktop — before injecting.
@@ -399,6 +412,18 @@ class BulbulForegroundService : Service() {
             json.optString("groq_api_key", "")
         } catch (t: Throwable) {
             Log.w(TAG, "reading config.json failed", t)
+            ""
+        }
+    }
+
+    private fun getGeminiApiKey(): String {
+        return try {
+            val file = File(tauriDataDir(), CONFIG_FILE)
+            if (!file.exists()) return ""
+            val json = org.json.JSONObject(file.readText())
+            json.optString("gemini_api_key", "")
+        } catch (t: Throwable) {
+            Log.w(TAG, "reading gemini_api_key from config.json failed", t)
             ""
         }
     }

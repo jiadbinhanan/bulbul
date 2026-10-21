@@ -81,6 +81,9 @@ object BulbulConfig {
     fun apiKey(context: Context): String =
         read(context)?.optString("groq_api_key", "").orEmpty()
 
+    fun geminiApiKey(context: Context): String =
+        read(context)?.optString("gemini_api_key", "").orEmpty()
+
     /// Whether the React wizard has finished the CURRENT onboarding pass
     /// (false again during a deliberate "Re-run setup wizard" replay).
     /// Gates the floating bubble in BulbulAccessibilityService — without
@@ -371,6 +374,24 @@ object BulbulConfig {
             }
         }
         return result to totalFixes
+    }
+
+    /// Returns the target words (`to_word`) from dictionary.json to bias STT models.
+    fun dictionaryWords(context: Context): List<String> {
+        val file = File(dataDir(context), DICTIONARY_FILE)
+        val arr = try {
+            if (!file.exists()) return emptyList()
+            org.json.JSONArray(file.readText())
+        } catch (t: Throwable) {
+            Log.w(TAG, "reading dictionary.json for words failed", t)
+            return emptyList()
+        }
+        val words = mutableListOf<String>()
+        for (i in 0 until arr.length()) {
+            val to = arr.getJSONObject(i).optString("to_word").trim()
+            if (to.isNotEmpty()) words.add(to)
+        }
+        return words
     }
 
     /// Expands snippets in a transcript: replaces each trigger phrase (matched

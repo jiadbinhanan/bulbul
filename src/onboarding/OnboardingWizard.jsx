@@ -1043,6 +1043,8 @@ function StepApiKey({ config, updateConfig, onBack, onNext }) {
 // label so users can scan to the one they want.
 const OTHER_LANGUAGES = [
   { code: "ar", label: "Arabic" },
+  { code: "bn-IN", label: "Bengali - India (বাংলা - প্রমিত)" },
+  { code: "bn-IN-tech", label: "Bengali - Coding (বাংলিশ টেক)" },
   { code: "zh", label: "Chinese" },
   { code: "nl", label: "Dutch" },
   { code: "fi", label: "Finnish" },
@@ -1076,6 +1078,7 @@ function detectDefaultLanguage() {
   const primary = tag.split("-")[0];
   if (primary === "hi" || primary === "ur") return { bucket: "hindi", otherCode: "" };
   if (primary === "en") return { bucket: "english", otherCode: "" };
+  if (primary === "bn") return { bucket: "other", otherCode: "bn-IN" };
   if (OTHER_LANGUAGE_CODES.includes(primary)) return { bucket: "other", otherCode: primary };
   return { bucket: "auto", otherCode: "" };
 }

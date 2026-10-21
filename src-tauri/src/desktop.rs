@@ -5,6 +5,7 @@ mod audio;
 mod config;
 mod correction;
 mod db;
+mod gemini;
 mod groq;
 mod hotkey;
 mod inject;
@@ -3414,7 +3415,19 @@ fn spawn_orchestrator(handle: AppHandle, rx: std::sync::mpsc::Receiver<HotkeyEve
                     }
                     let cfg_arc = handle.state::<AppState>().config.clone();
                     let cfg = cfg_arc.lock().clone();
-                    if !cfg.has_api_key() {
+                    let is_bengali_gemini = cfg.language == "bn-IN" || cfg.language == "bn-IN-tech";
+                    if is_bengali_gemini {
+                        if !cfg.has_gemini_key() {
+                            emit_status(
+                                &handle,
+                                "error",
+                                Some("Set your Gemini API key in Settings first.".into()),
+                            );
+                            notify(&handle, "Bulbul", "Set your Gemini API key in Settings first.");
+                            show_settings(&handle);
+                            continue;
+                        }
+                    } else if !cfg.has_api_key() {
                         emit_status(
                             &handle,
                             "error",
@@ -3937,21 +3950,37 @@ async fn process_pipeline(
     };
     let notify_rl: &groq::RetryNotify = &on_rate_limit;
 
+    let is_bengali_gemini = cfg.language == "bn-IN" || cfg.language == "bn-IN-tech";
+    let is_coding = cfg.language == "bn-IN-tech";
+
     let t_stt_start = Instant::now();
-    let transcript = match groq::transcribe(&cfg, wav, &vocabulary, Some(notify_rl)).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::error!("STT failed: {e:#}");
-            emit_status(&app, "error", Some(format!("STT: {e:#}")));
-            notify(&app, "Bulbul transcription failed", &format!("{e:#}"));
-            track_dictation_failed(&app, "stt", &meta.mode);
-            return;
+    let transcript = if is_bengali_gemini {
+        match gemini::transcribe(&cfg, wav, &vocabulary, is_coding).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Gemini STT failed: {e:#}");
+                emit_status(&app, "error", Some(format!("Gemini: {e:#}")));
+                notify(&app, "Bulbul transcription failed", &format!("{e:#}"));
+                track_dictation_failed(&app, "stt", &meta.mode);
+                return;
+            }
+        }
+    } else {
+        match groq::transcribe(&cfg, wav, &vocabulary, Some(notify_rl)).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("STT failed: {e:#}");
+                emit_status(&app, "error", Some(format!("STT: {e:#}")));
+                notify(&app, "Bulbul transcription failed", &format!("{e:#}"));
+                track_dictation_failed(&app, "stt", &meta.mode);
+                return;
+            }
         }
     };
     let t_stt_ms = t_stt_start.elapsed().as_millis() as u64;
     tracing::debug!("raw transcript: {transcript}");
-    if transcript.trim().is_empty() || groq::is_likely_hallucination(&transcript) {
-        tracing::info!("dropping likely-hallucinated transcript: {transcript:?}");
+    if transcript.trim().is_empty() || (!is_bengali_gemini && groq::is_likely_hallucination(&transcript)) {
+        tracing::info!("dropping empty or likely-hallucinated transcript: {transcript:?}");
         // Persist the rejected transcript so users can see WHAT Whisper
         // returned when their hotkey produced no output. If history shows
         // "thanks for watching" / "thank you" / "music", that's diagnostic
@@ -3978,90 +4007,92 @@ async fn process_pipeline(
         return;
     }
 
-    // Build the extra-context block appended to the cleanup system prompt.
-    // Two independent contributions:
-    //   1. Style preset (formal/casual/very-casual) inferred from the
-    //      foreground app, when style_enabled.
-    //   2. Few-shot personalization examples from the user's own past
-    //      dictations in this same app + mode, when personalize_cleanup.
-    // Concatenated with blank lines so the model reads them as separate
-    // instructions rather than one run-on block.
-    let mut style_parts: Vec<String> = Vec::new();
-    if cfg.style_enabled {
-        let category = cfg.category_for_app(meta.foreground_app.as_deref());
-        let key = cfg.style_for_category(category);
-        if let Some(m) = config::style_modifier(key) {
-            style_parts.push(m.to_string());
-        }
-    }
-    if cfg.personalize_cleanup && !matches!(cfg.mode, CleanupMode::Raw) {
-        let pairs = db::style_memory(
-            &db,
-            meta.foreground_app.as_deref(),
-            cfg.mode.as_str(),
-            3,
-        )
-        .unwrap_or_default();
-        if let Some(block) = format_style_memory(&pairs) {
-            tracing::info!(
-                "personalization: {} few-shot example(s) for app={:?} mode={}",
-                pairs.len(),
-                meta.foreground_app.as_deref().unwrap_or("(none)"),
-                cfg.mode.as_str()
-            );
-            style_parts.push(block);
-        }
-    }
-    // Correction memory (V3.1): the apply path is intentionally disabled.
-    // Injecting past corrections as few-shot Before/After pairs caused
-    // `llama-3.1-8b-instant` to emit the example text verbatim instead of
-    // cleaning the real transcript (observed: a "Cloud correctly" dictation
-    // came out as a stored correction's text). Capture/storage still runs so
-    // the data accrues; a safe apply mechanism is pending redesign.
-    // See `db::relevant_corrections` / `format_corrections` (kept for reuse).
-    let style_extra: Option<String> = if style_parts.is_empty() {
-        None
+    let (cleaned, t_cleanup_ms) = if is_bengali_gemini {
+        // Gemini 3.5 Transcribe in SMART mode performs disfluency removal,
+        // punctuation, and capitalization in a single pass. We bypass the
+        // second LLM network call to cut latency in half while letting
+        // downstream dictionary and snippet expansions run locally.
+        (transcript.clone(), 0u64)
     } else {
-        Some(style_parts.join("\n\n"))
-    };
-
-    // Venue hint: tell the cleanup model which app the text is being pasted
-    // into so it can adapt formatting conventions (no markdown in shells,
-    // paragraphs in email, terse in chat) without us authoring per-app rules.
-    // Gated on the same toggle as Style — flipping that off disables all
-    // per-app behavior in one switch.
-    let app_context: Option<String> = if cfg.style_enabled {
-        meta.foreground_app.as_deref().map(|exe| {
-            let name = config::friendly_app_name(exe);
-            format!(
-                "Venue: The user's cleaned text will be pasted into {name}. \
-                 Adapt formatting (markdown, code blocks, quotes, line breaks, \
-                 punctuation, greeting/sign-off) to that app's conventions. \
-                 Do not invent content the speaker did not say."
+        // Build the extra-context block appended to the cleanup system prompt.
+        // Two independent contributions:
+        //   1. Style preset (formal/casual/very-casual) inferred from the
+        //      foreground app, when style_enabled.
+        //   2. Few-shot personalization examples from the user's own past
+        //      dictations in this same app + mode, when personalize_cleanup.
+        // Concatenated with blank lines so the model reads them as separate
+        // instructions rather than one run-on block.
+        let mut style_parts: Vec<String> = Vec::new();
+        if cfg.style_enabled {
+            let category = cfg.category_for_app(meta.foreground_app.as_deref());
+            let key = cfg.style_for_category(category);
+            if let Some(m) = config::style_modifier(key) {
+                style_parts.push(m.to_string());
+            }
+        }
+        if cfg.personalize_cleanup && !matches!(cfg.mode, CleanupMode::Raw) {
+            let pairs = db::style_memory(
+                &db,
+                meta.foreground_app.as_deref(),
+                cfg.mode.as_str(),
+                3,
             )
-        })
-    } else {
-        None
-    };
-    if let Some(ctx) = &app_context {
-        tracing::info!("app context: {}", ctx);
-    }
-
-    let t_cleanup_start = Instant::now();
-    let cleaned = match groq::cleanup(
-        &cfg,
-        &transcript,
-        style_extra.as_deref(),
-        app_context.as_deref(),
-        Some(notify_rl),
-    ).await {
-        Ok(t) => t,
-        Err(e) => {
-            tracing::warn!("cleanup failed, falling back to raw: {e:#}");
-            transcript.clone()
+            .unwrap_or_default();
+            if let Some(block) = format_style_memory(&pairs) {
+                tracing::info!(
+                    "personalization: {} few-shot example(s) for app={:?} mode={}",
+                    pairs.len(),
+                    meta.foreground_app.as_deref().unwrap_or("(none)"),
+                    cfg.mode.as_str()
+                );
+                style_parts.push(block);
+            }
         }
+        let style_extra: Option<String> = if style_parts.is_empty() {
+            None
+        } else {
+            Some(style_parts.join("\n\n"))
+        };
+
+        // Venue hint: tell the cleanup model which app the text is being pasted
+        // into so it can adapt formatting conventions (no markdown in shells,
+        // paragraphs in email, terse in chat) without us authoring per-app rules.
+        // Gated on the same toggle as Style — flipping that off disables all
+        // per-app behavior in one switch.
+        let app_context: Option<String> = if cfg.style_enabled {
+            meta.foreground_app.as_deref().map(|exe| {
+                let name = config::friendly_app_name(exe);
+                format!(
+                    "Venue: The user's cleaned text will be pasted into {name}. \
+                     Adapt formatting (markdown, code blocks, quotes, line breaks, \
+                     punctuation, greeting/sign-off) to that app's conventions. \
+                     Do not invent content the speaker did not say."
+                )
+            })
+        } else {
+            None
+        };
+        if let Some(ctx) = &app_context {
+            tracing::info!("app context: {}", ctx);
+        }
+
+        let t_cleanup_start = Instant::now();
+        let cleaned_res = match groq::cleanup(
+            &cfg,
+            &transcript,
+            style_extra.as_deref(),
+            app_context.as_deref(),
+            Some(notify_rl),
+        ).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("cleanup failed, falling back to raw: {e:#}");
+                transcript.clone()
+            }
+        };
+        let cleanup_ms = t_cleanup_start.elapsed().as_millis() as u64;
+        (cleaned_res, cleanup_ms)
     };
-    let t_cleanup_ms = t_cleanup_start.elapsed().as_millis() as u64;
     tracing::debug!("cleaned: {cleaned}");
 
     let t_local_start = Instant::now();

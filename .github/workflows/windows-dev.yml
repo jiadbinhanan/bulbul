@@ -1,17 +1,10 @@
 name: Windows dev build
 
-# Rolling pre-release for the v1.1.1 branch (desktop + Android
-# unified). Every push to v1.1.1 rebuilds + replaces the
-# `windows-dev` release with a fresh NSIS installer. The tester pulls via
-# the same install flow as the other desktop dev builds.
-#
-# Sibling workflows linux-dev.yml, macos-dev.yml, and android-dev.yml
-# cover the other targets of the same branch. When v1.1.1 ships to main,
-# drop all four.
-
+# Builds fresh Windows NSIS installer on push to main or manual trigger.
 on:
-  # Manual only — run from the Actions tab (or `gh workflow run`) when
-  # a dev build is explicitly wanted. No longer builds on every push.
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
@@ -41,16 +34,28 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Configure updater artifacts for fork builds
+        id: prep
+        shell: pwsh
+        run: |
+          if ("${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" -eq "") {
+            Write-Host "No TAURI_SIGNING_PRIVATE_KEY found; disabling updater artifacts so Windows installer builds cleanly without signing..."
+            $confPath = "src-tauri/tauri.conf.json"
+            $json = Get-Content $confPath -Raw | ConvertFrom-Json
+            $json.bundle.createUpdaterArtifacts = $false
+            $json | ConvertTo-Json -Depth 10 | Set-Content $confPath
+            echo "include_updater=false" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "include_updater=true" >> $env:GITHUB_OUTPUT
+          }
+
       - name: Wipe previous dev release
-        # Mirrors the other dev workflows: delete the existing release
-        # first so the updater manifest never points at a fresh bundle
-        # with a stale embedded signature. `|| true` keeps the first run
-        # green when no prior release exists.
+        # Delete existing release tag so fresh build replaces it cleanly
         run: gh release delete windows-dev --yes --cleanup-tag || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build + sign dev release
+      - name: Build Windows release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -58,11 +63,22 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: windows-dev
-          releaseName: 'Bulbul Windows dev build'
+          releaseName: 'Bulbul Windows Build'
           releaseBody: |
-            Rolling Windows dev build from the `v1.1.1` branch. **Not for general use** — this is a pre-release for testing the merged desktop + Android v1.1.
-
-            Download and run the `.exe` NSIS installer below. Each push to `v1.1.1` replaces this release. Production builds live in tagged `vX.Y.Z` releases.
+            Automated Windows build of Bulbul with Google Gemini 3.5 Transcribe support for Bengali and Banglish Coding dictation.
+            
+            Download and run the `.exe` NSIS installer below.
           releaseDraft: false
           prerelease: true
-          includeUpdaterJson: true
+          includeUpdaterJson: ${{ steps.prep.outputs.include_updater == 'true' }}
+
+      - name: Upload Windows installer artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Bulbul-Windows-Setup
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/*.exe
+          if-no-files-found: warn

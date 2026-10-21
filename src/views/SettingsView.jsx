@@ -45,6 +45,8 @@ const LANGUAGES = [
   { code: "auto", label: "Auto-detect (English-leaning)" },
   { code: "en", label: "English" },
   { code: "hi", label: "Hindi / Hinglish" },
+  { code: "bn-IN", label: "Bengali - India (বাংলা - প্রমিত)" },
+  { code: "bn-IN-tech", label: "Bengali - Coding (বাংলিশ টেক)" },
   { code: "es", label: "Spanish" },
   { code: "fr", label: "French" },
   { code: "de", label: "German" },
@@ -82,7 +84,7 @@ const CATEGORIES = [
 // inside so the list reads as a menu, not a wall of controls.
 const M_SECTIONS = [
   { id: "general", label: "General", hint: "Cleanup mode, language, appearance" },
-  { id: "account", label: "Account", hint: "Your Groq API key" },
+  { id: "account", label: "Account", hint: "Your Groq and Gemini API keys" },
   { id: "overlay", label: "Overlay", hint: "Dictation bubble opacity and size" },
   { id: "personalization", label: "Personalization", hint: "Your name and cleanup preferences" },
   { id: "privacy", label: "Privacy", hint: "Anonymous usage stats" },
@@ -119,16 +121,22 @@ export default function SettingsView({
   const [draftKey, setDraftKey] = useState(config?.groq_api_key || "");
   const [keyState, setKeyState] = useState("idle");
   const [keyError, setKeyError] = useState("");
+  const [draftGeminiKey, setDraftGeminiKey] = useState(config?.gemini_api_key || "");
+  const [geminiKeyState, setGeminiKeyState] = useState("idle");
+  const [geminiKeyError, setGeminiKeyError] = useState("");
   const [recordingHotkeyFor, setRecordingHotkeyFor] = useState(null);
   const [recordingError, setRecordingError] = useState("");
   const [updateState, setUpdateState] = useState({ state: "idle", message: "" });
   const paneRef = useRef(null);
 
-  // Keep the draft key in sync if the config changes externally (e.g.,
-  // the user just finished onboarding and the api key is now set).
+  // Keep the draft keys in sync if the config changes externally (e.g.,
+  // the user just finished onboarding or updated settings).
   useEffect(() => {
-    if (open) setDraftKey(config?.groq_api_key || "");
-  }, [open, config?.groq_api_key]);
+    if (open) {
+      setDraftKey(config?.groq_api_key || "");
+      setDraftGeminiKey(config?.gemini_api_key || "");
+    }
+  }, [open, config?.groq_api_key, config?.gemini_api_key]);
 
   // Reset the scroll position when the user switches categories so the
   // new content always starts from the top.
@@ -271,6 +279,7 @@ export default function SettingsView({
   if (!open || !config) return null;
 
   const hasKey = config.groq_api_key && config.groq_api_key.trim().length > 0;
+  const hasGeminiKey = config.gemini_api_key && config.gemini_api_key.trim().length > 0;
 
   async function saveKey() {
     setKeyState("checking");
@@ -282,6 +291,18 @@ export default function SettingsView({
     } catch (e) {
       setKeyState("invalid");
       setKeyError(String(e));
+    }
+  }
+
+  async function saveGeminiKey() {
+    setGeminiKeyState("checking");
+    setGeminiKeyError("");
+    try {
+      await updateConfig({ ...config, gemini_api_key: draftGeminiKey.trim() });
+      setGeminiKeyState("valid");
+    } catch (e) {
+      setGeminiKeyState("invalid");
+      setGeminiKeyError(String(e));
     }
   }
 
@@ -340,6 +361,13 @@ export default function SettingsView({
               keyState={keyState}
               keyError={keyError}
               setKeyState={setKeyState}
+              hasGeminiKey={hasGeminiKey}
+              draftGeminiKey={draftGeminiKey}
+              setDraftGeminiKey={setDraftGeminiKey}
+              saveGeminiKey={saveGeminiKey}
+              geminiKeyState={geminiKeyState}
+              geminiKeyError={geminiKeyError}
+              setGeminiKeyState={setGeminiKeyState}
             />
           );
         case "overlay":
@@ -457,6 +485,13 @@ export default function SettingsView({
                 keyState={keyState}
                 keyError={keyError}
                 setKeyState={setKeyState}
+                hasGeminiKey={hasGeminiKey}
+                draftGeminiKey={draftGeminiKey}
+                setDraftGeminiKey={setDraftGeminiKey}
+                saveGeminiKey={saveGeminiKey}
+                geminiKeyState={geminiKeyState}
+                geminiKeyError={geminiKeyError}
+                setGeminiKeyState={setGeminiKeyState}
               />
             )}
             {active === "hotkeys" && (
@@ -574,17 +609,34 @@ function PaneGeneral({ config, updateConfig }) {
   );
 }
 
-function PaneAccount({ config, updateConfig, hasKey, draftKey, setDraftKey, saveKey, keyState, keyError, setKeyState }) {
-  // Cleanup runs on Groq (qwen → gpt-oss-20b → gpt-oss-120b fallback chain). A
-  // second cleanup provider (Cerebras) exists in the backend but is intentionally
-  // NOT exposed in the UI, so it stays dormant — users can't reach it.
+function PaneAccount({
+  config,
+  updateConfig,
+  hasKey,
+  draftKey,
+  setDraftKey,
+  saveKey,
+  keyState,
+  keyError,
+  setKeyState,
+  hasGeminiKey,
+  draftGeminiKey,
+  setDraftGeminiKey,
+  saveGeminiKey,
+  geminiKeyState,
+  geminiKeyError,
+  setGeminiKeyState,
+}) {
+  // Groq handles STT and cleanup for standard languages (qwen → gpt-oss-20b fallback).
+  // Google Gemini 3.5 Transcribe handles Bengali (bn-IN) and Banglish Coding (bn-IN-tech)
+  // in single-pass SMART mode with custom vocabulary biasing.
 
   return (
     <>
       <Row
         title="Groq API key"
         hint={hasKey
-          ? "Connected. Pasting a new key updates it."
+          ? "Connected. Used for speech-to-text and cleanup across English, Hindi, and standard languages."
           : "Bulbul talks to Groq using your own key. Grab a free one from console.groq.com/keys."}
         stack
       >
@@ -617,6 +669,42 @@ function PaneAccount({ config, updateConfig, hasKey, draftKey, setDraftKey, save
             </a>
           </p>
         )}
+      </Row>
+
+      <Row
+        title="Google Gemini API key"
+        hint={hasGeminiKey
+          ? "Connected. Powers Bengali (বাংলা) and Banglish Coding dictation via Gemini 3.5 Transcribe."
+          : "Required for Bengali (বাংলা) & Banglish Coding dictation via Gemini 3.5 Transcribe. Get a key from aistudio.google.com."}
+        stack
+      >
+        <div className="settings-key-row">
+          <input
+            type="password"
+            value={draftGeminiKey}
+            placeholder="AIzaSy…"
+            onChange={(e) => { setDraftGeminiKey(e.target.value); setGeminiKeyState("idle"); }}
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <button
+            className="primary"
+            disabled={(!draftGeminiKey.trim() && !hasGeminiKey) || geminiKeyState === "checking"}
+            onClick={saveGeminiKey}
+          >
+            {geminiKeyState === "checking" ? "Saving…" : hasGeminiKey ? (draftGeminiKey.trim() ? "Update" : "Clear") : "Save"}
+          </button>
+        </div>
+        {geminiKeyState === "valid" && <p className="ok small">Gemini API key saved.</p>}
+        {geminiKeyState === "invalid" && <p className="err small">{geminiKeyError}</p>}
+        <p className="muted small">
+          <a
+            href="https://aistudio.google.com/apikey"
+            onClick={(e) => { e.preventDefault(); openUrl("https://aistudio.google.com/apikey"); }}
+          >
+            Get an API key from Google AI Studio →
+          </a>
+        </p>
       </Row>
     </>
   );
