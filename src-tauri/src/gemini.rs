@@ -108,6 +108,7 @@ struct GeminiResponse {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct GeminiError {
     message: String,
     code: Option<u32>,
