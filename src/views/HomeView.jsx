@@ -1,86 +1,106 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (c) 2026 Romanch Roshan Singh
+// Copyright (c) 2026 Romanch Roshan Singh & Bulbul contributors
 
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import FeatureHero from "../components/FeatureHero.jsx";
-import HowToCard from "../components/HowToCard.jsx";
 import ConfirmDialog from "../components/ConfirmDialog.jsx";
+import RecordingCardV2, {
+  RerunTranscribeModal,
+  RerunPostProcessModal,
+} from "../components/RecordingCardV2.jsx";
 import { OS_NOUN, IS_ANDROID } from "../platform.js";
 import featureHomeImg from "../assets/feature-home.png";
+import "./HomeHistoryV2.css";
 
-const PAGE_SIZE = 50;
+const RECENT_LIMIT = 10;
 
-export default function HomeView({ displayName }) {
+export default function HomeView({ displayName, onNavigate }) {
   const [stats, setStats] = useState(null);
-  const [recent, setRecent] = useState([]);
-  const [hasMore, setHasMore] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const [totalCount, setTotalCount] = useState(0);
+  const [recordings, setRecordings] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
+
+  // Re-run modal states
+  const [rerunTransModal, setRerunTransModal] = useState(null); // recording item or null
+  const [rerunPostModal, setRerunPostModal] = useState(null); // { recording, transTry } or null
+  const [contextModes, setContextModes] = useState([]);
 
   useEffect(() => {
     let mounted = true;
     async function load() {
       try {
-        const [s, r] = await Promise.all([
-          invoke("get_home_stats"),
-          invoke("get_recent_dictations", { limit: PAGE_SIZE, offset: 0 }),
+        setLoading(true);
+        const [s, recs, modes, cnt] = await Promise.all([
+          invoke("get_home_stats").catch(() => null),
+          invoke("list_recordings_v2", { limit: RECENT_LIMIT, offset: 0 }).catch(() => []),
+          invoke("list_context_modes").catch(() => []),
+          invoke("count_recordings_v2").catch(() => 0),
         ]);
         if (mounted) {
           setStats(s);
-          setRecent(r);
-          setHasMore(r.length === PAGE_SIZE);
+          setRecordings(recs);
+          setContextModes(modes);
+          setTotalCount(cnt);
         }
       } catch (e) {
         console.error("home load failed", e);
+      } finally {
+        if (mounted) setLoading(false);
       }
     }
     load();
 
     const un = listen("bulbul-status", (e) => {
-      if (e.payload.state === "done") load();
+      if (e.payload?.state === "done" || e.payload?.state === "idle") {
+        invoke("list_recordings_v2", { limit: RECENT_LIMIT, offset: 0 })
+          .then((recs) => mounted && setRecordings(recs))
+          .catch(() => {});
+        invoke("get_home_stats")
+          .then((s) => mounted && setStats(s))
+          .catch(() => {});
+        invoke("count_recordings_v2")
+          .then((c) => mounted && setTotalCount(c))
+          .catch(() => {});
+      }
     });
+
     return () => {
       mounted = false;
       un.then((f) => f());
     };
   }, []);
 
-  async function loadOlder() {
-    if (loadingMore || !hasMore) return;
-    setLoadingMore(true);
-    try {
-      const next = await invoke("get_recent_dictations", {
-        limit: PAGE_SIZE,
-        offset: recent.length,
-      });
-      setRecent((prev) => [...prev, ...next]);
-      setHasMore(next.length === PAGE_SIZE);
-    } catch (e) {
-      console.error("load older failed", e);
-    } finally {
-      setLoadingMore(false);
-    }
-  }
-
-  // Splice the row out locally (no need to re-fetch the whole page, which
-  // would also reset any "load older" progress) and separately refresh
-  // stats, since word/streak totals need to drop the deleted entry too.
   async function confirmDelete() {
     const id = pendingDeleteId;
     setPendingDeleteId(null);
-    if (id == null) return;
+    if (!id) return;
     try {
-      await invoke("delete_dictation", { id });
-      setRecent((prev) => prev.filter((d) => d.id !== id));
+      await invoke("delete_recording_v2", { id });
+      setRecordings((prev) => prev.filter((r) => r.recording.id !== id));
       invoke("get_home_stats").then(setStats).catch(() => {});
+      invoke("count_recordings_v2").then(setTotalCount).catch(() => {});
     } catch (e) {
-      console.error("delete dictation failed", e);
+      console.error("delete recording failed", e);
     }
   }
 
-  const grouped = groupByDay(recent);
+  async function handleTogglePin(id) {
+    try {
+      const nextPinned = await invoke("toggle_recording_pinned", { id });
+      setRecordings((prev) =>
+        prev.map((r) =>
+          r.recording.id === id
+            ? { ...r, recording: { ...r.recording, is_pinned: nextPinned } }
+            : r
+        )
+      );
+    } catch (e) {
+      console.error("toggle pin failed", e);
+    }
+  }
 
   return (
     <div className="page home">
@@ -88,7 +108,9 @@ export default function HomeView({ displayName }) {
         <h1>
           Welcome back{displayName && displayName.trim() ? `, ${displayName.trim()}` : ""}
         </h1>
-        <p className="muted small">Your dictation activity stays on your machine. Audio goes to Groq via your API key for transcription; history, dictionary, and snippets all live locally.</p>
+        <p className="muted small">
+          Local-first, two-phase dictation. Audio is persisted locally before upload; speech is transcribed via Gemini 3.5 and optionally refined via Phase 2 LLMs.
+        </p>
       </header>
 
       <FeatureHero
@@ -97,33 +119,16 @@ export default function HomeView({ displayName }) {
         blurb={
           IS_ANDROID
             ? "Tap the floating bubble in any app, talk, and Bulbul types the cleaned-up text right where your cursor is."
-            : `Hold your hotkey anywhere on ${OS_NOUN}, talk, release. Bulbul transcribes, cleans up, and pastes the result right at your cursor.`
+            : `Hold your hotkey anywhere on ${OS_NOUN}, talk, release. Bulbul transcribes, formats with your active Context Mode, and types right at your cursor.`
         }
         image={featureHomeImg}
       />
 
-      {/* Superseded by the FeatureHero banner photo above — kept here,
-          not deleted, in case the image treatment doesn't cover this
-          ground well enough and the explicit steps need to come back.
-      {IS_ANDROID && (
-        <HowToCard title="How to dictate" storageKey="bulbul.home.howto">
-          <ol className="howto-steps">
-            <li>Open any app and tap a text field — the Bulbul bubble appears above the keyboard.</li>
-            <li>Tap the bubble to start, tap again to stop. Or press and hold to talk, and release to send.</li>
-            <li>Your words are transcribed and typed right where your cursor is.</li>
-          </ol>
-          <p className="howto-tip">
-            Drag the bubble down onto the snooze circle to hide it for a while. Adjust its size, opacity, and snooze time in Settings → Overlay.
-          </p>
-        </HowToCard>
-      )}
-      */}
-
       <section className="stat-cards">
         <StatCard
-          label="Total words"
-          value={stats ? formatNumber(stats.total_words) : "—"}
-          subtitle={stats ? `${formatNumber(stats.total_dictations)} dictations` : ""}
+          label="Total recordings"
+          value={formatNumber(totalCount || recordings.length)}
+          subtitle="Saved locally"
         />
         <StatCard
           label="Words per minute"
@@ -136,187 +141,132 @@ export default function HomeView({ displayName }) {
           subtitle={stats?.day_streak === 1 ? "day" : "days in a row"}
         />
         <StatCard
-          label="Fixes by Bulbul"
-          value={stats ? formatNumber(stats.total_fixes) : "—"}
-          subtitle="Words cleaned up"
+          label="Context Modes"
+          value={contextModes ? `${contextModes.length}` : "5"}
+          subtitle="Ready to use"
         />
       </section>
 
       <section className="timeline-section">
-        <h3>Recent activity</h3>
-        {recent.length === 0 ? (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+          <div>
+            <h3 style={{ margin: 0 }}>Recent Activity</h3>
+            <span className="muted x-small">Showing last {Math.min(recordings.length, RECENT_LIMIT)} recordings</span>
+          </div>
+          {onNavigate && (
+            <button
+              type="button"
+              className="btn-action"
+              onClick={() => onNavigate("history")}
+              style={{ padding: "6px 14px", fontSize: "12px", cursor: "pointer" }}
+            >
+              View Full History ({totalCount || recordings.length}) →
+            </button>
+          )}
+        </div>
+
+        {loading ? (
+          <div className="empty-state"><p className="muted">Loading activity...</p></div>
+        ) : recordings.length === 0 ? (
           <div className="empty-state">
             <p>
-              No dictations yet.{" "}
-              {IS_ANDROID
-                ? "Tap the bubble in any app and start talking."
-                : `Hold your hotkey anywhere on ${OS_NOUN} and start talking.`}
+              No recordings yet. Hold your hotkey anywhere on {OS_NOUN} (or tap if Tap to Talk is on) and start talking!
             </p>
           </div>
         ) : (
-          <div className="timeline">
-            {grouped.map(({ day, items }) => (
-              <div key={day} className="day-group">
-                <div className="day-label">{day}</div>
-                <div className="day-card">
-                  {items.map((d) => (
-                    <DictationRow key={d.id} d={d} onRequestDelete={setPendingDeleteId} />
-                  ))}
-                </div>
-              </div>
+          <div className="timeline-v2">
+            {recordings.slice(0, RECENT_LIMIT).map((rec) => (
+              <RecordingCardV2
+                key={rec.recording.id}
+                rec={rec}
+                onTogglePin={() => handleTogglePin(rec.recording.id)}
+                onRequestDelete={() => setPendingDeleteId(rec.recording.id)}
+                onOpenRerunTrans={() => setRerunTransModal(rec)}
+                onOpenRerunPost={(transTry) =>
+                  setRerunPostModal({ recording: rec, transTry })
+                }
+              />
             ))}
-            {hasMore && (
-              <button
-                className="load-older"
-                onClick={loadOlder}
-                disabled={loadingMore}
-              >
-                {loadingMore ? "Loading…" : "Load older activity"}
-              </button>
-            )}
+          </div>
+        )}
+
+        {recordings.length > 0 && onNavigate && (
+          <div style={{ textAlign: "center", marginTop: "20px" }}>
+            <button
+              type="button"
+              className="btn-action"
+              onClick={() => onNavigate("history")}
+              style={{ padding: "8px 20px", fontSize: "13px" }}
+            >
+              Browse All Past Recordings in History →
+            </button>
           </div>
         )}
       </section>
 
+      {/* Delete Confirmation */}
       <ConfirmDialog
         open={pendingDeleteId !== null}
-        title="Delete this dictation?"
-        message="This removes it from your history. This can't be undone."
+        title="Delete this recording?"
+        message="This permanently deletes the audio file and all transcription attempts from your machine."
         confirmLabel="Delete"
         danger
         onConfirm={confirmDelete}
         onCancel={() => setPendingDeleteId(null)}
       />
+
+      {/* Re-Transcribe Modal */}
+      {rerunTransModal && (
+        <RerunTranscribeModal
+          rec={rerunTransModal}
+          onClose={() => setRerunTransModal(null)}
+          onSuccess={(newTry) => {
+            setRecordings((prev) =>
+              prev.map((r) =>
+                r.recording.id === rerunTransModal.recording.id
+                  ? { ...r, transcription_tries: [...r.transcription_tries, newTry] }
+                  : r
+              )
+            );
+            setRerunTransModal(null);
+          }}
+        />
+      )}
+
+      {/* Re-Post-Process Modal */}
+      {rerunPostModal && (
+        <RerunPostProcessModal
+          rec={rerunPostModal.recording}
+          transTry={rerunPostModal.transTry}
+          modes={contextModes}
+          onClose={() => setRerunPostModal(null)}
+          onSuccess={(newPostTry) => {
+            setRecordings((prev) =>
+              prev.map((r) =>
+                r.recording.id === rerunPostModal.recording.recording.id
+                  ? { ...r, post_process_tries: [...r.post_process_tries, newPostTry] }
+                  : r
+              )
+            );
+            setRerunPostModal(null);
+          }}
+        />
+      )}
     </div>
-  );
-}
-
-function DictationRow({ d, onRequestDelete }) {
-  // Idle → copied → idle. The copied state is purely cosmetic (icon
-  // swaps to a check, button stays highlighted) so the user sees the
-  // copy succeeded without needing a toast.
-  const [copied, setCopied] = useState(false);
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(d.cleaned_text);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1200);
-    } catch (e) {
-      console.error("copy failed", e);
-    }
-  }
-
-  return (
-    <div className="dictation-row">
-      <div className="dictation-time">{formatTime(d.ts)}</div>
-      <div className="dictation-body">
-        <div className="dictation-text">{d.cleaned_text}</div>
-        <div className="dictation-meta">
-          {d.foreground_app && <span className="badge">{stripExe(d.foreground_app)}</span>}
-          <span className="badge muted-badge">{d.mode}</span>
-          <span className="badge muted-badge">{d.word_count}w</span>
-        </div>
-      </div>
-      <div className="dictation-actions">
-        <button
-          type="button"
-          className={`dictation-copy ${copied ? "copied" : ""}`}
-          onClick={copy}
-          aria-label={copied ? "Copied" : "Copy text"}
-          title={copied ? "Copied" : "Copy text"}
-        >
-          {copied ? <CheckIcon /> : <CopyIcon />}
-        </button>
-        <button
-          type="button"
-          className="dictation-delete"
-          onClick={() => onRequestDelete(d.id)}
-          aria-label="Delete"
-          title="Delete this dictation"
-        >
-          <TrashIcon />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function CopyIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-    </svg>
-  );
-}
-
-function CheckIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <polyline points="20 6 9 17 4 12" />
-    </svg>
-  );
-}
-
-function TrashIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M3 6h18" />
-      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-    </svg>
   );
 }
 
 function StatCard({ label, value, subtitle }) {
   return (
     <div className="stat-card">
-      <div className="stat-value">{value}</div>
       <div className="stat-label">{label}</div>
-      {subtitle && <div className="stat-subtitle">{subtitle}</div>}
+      <div className="stat-value">{value}</div>
+      {subtitle && <div className="stat-sub">{subtitle}</div>}
     </div>
   );
 }
 
 function formatNumber(n) {
-  if (n == null) return "—";
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
-  return n.toString();
-}
-
-function formatTime(unix) {
-  const d = new Date(unix * 1000);
-  return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-}
-
-function stripExe(name) {
-  return name.replace(/\.exe$/i, "");
-}
-
-function groupByDay(rows) {
-  const out = [];
-  let currentDay = null;
-  for (const r of rows) {
-    const day = dayLabel(r.ts);
-    if (day !== currentDay) {
-      out.push({ day, items: [] });
-      currentDay = day;
-    }
-    out[out.length - 1].items.push(r);
-  }
-  return out;
-}
-
-function dayLabel(unix) {
-  const d = new Date(unix * 1000);
-  const now = new Date();
-  const oneDay = 86_400_000;
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfRow = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const diff = startOfToday - startOfRow;
-  if (diff === 0) return "Today";
-  if (diff === oneDay) return "Yesterday";
-  if (diff < 7 * oneDay) return d.toLocaleDateString(undefined, { weekday: "long" });
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (n == null) return "0";
+  return n.toLocaleString();
 }

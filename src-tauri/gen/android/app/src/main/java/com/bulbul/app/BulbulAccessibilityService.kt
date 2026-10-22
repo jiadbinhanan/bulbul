@@ -127,12 +127,13 @@ class BulbulAccessibilityService : AccessibilityService() {
             // edit fires its own event before the submit's clear does,
             // where an 800ms poll could land on either side and miss it.
             AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                val source = event.source
                 try {
-                    CorrectionWatcher.onTextChanged(event.packageName?.toString(), event.source)
+                    CorrectionWatcher.onTextChanged(event.packageName?.toString(), source)
                 } catch (t: Throwable) {
                     Log.w(TAG, "forwarding text-changed event failed", t)
                 } finally {
-                    event.source?.recycle()
+                    source?.recycle()
                 }
             }
         }

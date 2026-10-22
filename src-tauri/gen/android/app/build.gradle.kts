@@ -27,6 +27,7 @@ val keystoreProperties = Properties().apply {
 
 android {
     compileSdk = 36
+    ndkVersion = "29.0.13846066"
     namespace = "com.bulbul.app"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"

@@ -1,0 +1,541 @@
+/* SPDX-License-Identifier: GPL-3.0-only */
+/* Copyright (c) 2026 Bulbul contributors */
+
+/* ── Royal Gold Theme Variables ──────────────────────────────── */
+:root {
+  --gold-primary: #d4af37;
+  --gold-secondary: #e6c66e;
+  --gold-surface: rgba(212, 175, 55, 0.08);
+  --gold-border: rgba(212, 175, 55, 0.32);
+  --gold-glow: rgba(212, 175, 55, 0.22);
+  --gold-gradient: linear-gradient(135deg, #dfb743 0%, #b89327 100%);
+  --gold-text-contrast: #0e0e0e;
+}
+
+:root[data-theme="light"] {
+  --gold-primary: #a87b18;
+  --gold-secondary: #8c640e;
+  --gold-surface: rgba(168, 123, 24, 0.09);
+  --gold-border: rgba(168, 123, 24, 0.38);
+  --gold-glow: rgba(168, 123, 24, 0.15);
+  --gold-gradient: linear-gradient(135deg, #c59828 0%, #a87b18 100%);
+  --gold-text-contrast: #ffffff;
+}
+
+/* ── Multi-Try Recording Card ────────────────────────────────── */
+.history-card-v2 {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 14px;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+
+:root[data-theme="light"] .history-card-v2 {
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+}
+
+.history-card-v2:hover {
+  border-color: var(--border-strong);
+}
+
+.history-card-v2.pinned-card {
+  border-color: var(--gold-primary);
+  background: var(--gold-surface);
+  box-shadow: 0 0 16px var(--gold-glow);
+}
+
+.history-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.history-meta-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.history-time {
+  font-weight: 500;
+  color: var(--text);
+}
+
+.history-audio-duration {
+  background: var(--fill);
+  border: 1px solid var(--border);
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.history-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Action Icon Buttons */
+.btn-icon-v2 {
+  background: var(--fill);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.btn-icon-v2:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.btn-icon-v2.pinned {
+  color: var(--gold-primary);
+  background: var(--gold-surface);
+  border-color: var(--gold-border);
+  font-size: 15px;
+}
+
+/* Delete Button - Clearly visible and highlighted in all themes */
+.btn-icon-v2.danger {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+:root[data-theme="light"] .btn-icon-v2.danger {
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.35);
+}
+
+.btn-icon-v2.danger:hover {
+  background: rgba(239, 68, 68, 0.22);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.6);
+  transform: scale(1.04);
+}
+
+:root[data-theme="light"] .btn-icon-v2.danger:hover {
+  background: rgba(220, 38, 38, 0.18);
+  color: #b91c1c;
+  border-color: rgba(220, 38, 38, 0.6);
+}
+
+/* ── Inline Audio Player ─────────────────────────────────────── */
+.inline-audio-player {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+}
+
+.audio-play-btn {
+  background: var(--gold-gradient);
+  color: var(--gold-text-contrast);
+  border: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 13px;
+  box-shadow: 0 2px 8px var(--gold-glow);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+  flex-shrink: 0;
+}
+
+.audio-play-btn:hover {
+  transform: scale(1.08);
+  box-shadow: 0 3px 12px var(--gold-glow);
+}
+
+.audio-track-slider {
+  flex: 1;
+  accent-color: var(--gold-primary);
+  height: 4px;
+  cursor: pointer;
+}
+
+.audio-time-label {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  min-width: 60px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* ── Phase Tabs & Version Switcher ───────────────────────────── */
+.phase-selection-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.phase-tabs {
+  display: flex;
+  gap: 4px;
+  background: var(--field);
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.phase-tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.phase-tab-btn:hover {
+  color: var(--text);
+}
+
+.phase-tab-btn.active-phase {
+  background: var(--surface-1);
+  color: var(--gold-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.try-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.try-pill {
+  background: var(--field);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 2px 8px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 120ms ease;
+}
+
+.try-pill:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.try-pill.active-try {
+  background: var(--gold-surface);
+  color: var(--gold-primary);
+  border-color: var(--gold-primary);
+  font-weight: 600;
+  box-shadow: 0 0 6px var(--gold-glow);
+}
+
+/* ── Text Content Container ──────────────────────────────────── */
+.history-content-box {
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  position: relative;
+}
+
+:root[data-theme="light"] .history-content-box {
+  background: var(--fill);
+}
+
+.content-top-badges {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.badge-info-cluster {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.text-body-v2 {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.prompt-snapshot-tag {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.badge-active-glow {
+  background: var(--gold-surface);
+  color: var(--gold-primary);
+  border: 1px solid var(--gold-border);
+  font-weight: 600;
+}
+
+.badge-provider {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+.badge-model {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.badge-phase1 {
+  background: rgba(59, 130, 246, 0.1);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+:root[data-theme="light"] .badge-phase1 {
+  background: rgba(37, 99, 235, 0.08);
+  color: #2563eb;
+  border-color: rgba(37, 99, 235, 0.25);
+}
+
+.badge-thinking {
+  background: rgba(168, 85, 247, 0.1);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.25);
+}
+
+:root[data-theme="light"] .badge-thinking {
+  background: rgba(147, 51, 234, 0.08);
+  color: #9333ea;
+  border-color: rgba(147, 51, 234, 0.25);
+}
+
+.muted-badge {
+  color: var(--text-faint);
+}
+
+/* ── Card Footer & Re-Run Actions ────────────────────────────── */
+.history-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.rerun-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-rerun {
+  background: var(--fill);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  padding: 5px 11px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.btn-rerun:hover {
+  background: var(--gold-surface);
+  border-color: var(--gold-primary);
+  color: var(--gold-primary);
+}
+
+/* ── Re-Run Modals ───────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(4px);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.modal-content {
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  width: 100%;
+  box-shadow: 0 16px 36px var(--shadow, rgba(0, 0, 0, 0.4));
+  padding: 22px;
+  color: var(--text);
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 18px;
+}
+
+.modal-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-heading);
+  margin: 0;
+}
+
+.modal-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.modal-close-btn:hover {
+  color: var(--text);
+}
+
+.form-group {
+  margin-bottom: 14px;
+}
+
+.form-group-row {
+  display: flex;
+  gap: 12px;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+.form-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-2);
+  margin-bottom: 6px;
+}
+
+.form-group select,
+.form-group input,
+.form-group textarea {
+  width: 100%;
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 12.5px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.form-group select:focus,
+.form-group input:focus,
+.form-group textarea:focus {
+  border-color: var(--gold-primary);
+  box-shadow: 0 0 0 2px var(--gold-glow);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.btn-action {
+  background: var(--fill);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 120ms ease;
+}
+
+.btn-action:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.btn-action.copied {
+  background: var(--gold-surface);
+  color: var(--gold-primary);
+  border-color: var(--gold-border);
+}
+
+.btn-primary {
+  background: var(--gold-gradient);
+  border: 1px solid var(--gold-primary);
+  color: var(--gold-text-contrast);
+  font-weight: 600;
+  border-radius: 6px;
+  padding: 6px 16px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 120ms ease;
+  box-shadow: 0 2px 8px var(--gold-glow);
+}
+
+.btn-primary:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px var(--gold-glow);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

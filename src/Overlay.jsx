@@ -53,6 +53,9 @@ export default function Overlay() {
   const [hovered, setHovered] = useState(false);
   const [lang, setLang] = useState("auto");
   const [langOpen, setLangOpen] = useState(false);
+  const [contextModes, setContextModes] = useState([]);
+  const [activeModeId, setActiveModeId] = useState(1);
+  const [modeOpen, setModeOpen] = useState(false);
   // Bulbul's pipeline emits state="idle" with a message string for the
   // two silent-rejection paths ("Too short, ignored." and "Silence —
   // nothing to transcribe."). Without inflating those into a distinct
@@ -81,7 +84,12 @@ export default function Overlay() {
       .then((cfg) => {
         setLang(cfg.language || "auto");
         setDockAnchor(cfg.overlay_position || "bottom-center");
+        setActiveModeId(cfg.active_context_mode_id || 1);
       })
+      .catch(() => {});
+
+    invoke("list_context_modes")
+      .then((modes) => setContextModes(modes || []))
       .catch(() => {});
 
     const un1 = listen("bulbul-status", (e) => {
@@ -132,34 +140,37 @@ export default function Overlay() {
   useEffect(() => {
     if (!hovered || effectiveState !== "idle") {
       if (langOpen) setLangOpen(false);
+      if (modeOpen) setModeOpen(false);
     }
   }, [hovered, effectiveState]);
 
-  // Close on a click anywhere else in the overlay — the hover-exit check
-  // above only fires once the cursor actually leaves the window, so a
-  // click on empty space or another satellite button while the dropdown
-  // is open did nothing. Excludes the toggle button itself: its own
-  // onClick already flips langOpen, and this handler firing first (on
-  // pointerdown, before the button's click event) would otherwise close
-  // it and let the button's toggle immediately reopen it.
+  // Close on a click anywhere else in the overlay
   useEffect(() => {
-    if (!langOpen) return;
+    if (!langOpen && !modeOpen) return;
     function handlePointerDown(e) {
       const dropdown = document.querySelector(".lang-dropdown");
       const btn = document.querySelector(".lang-btn");
-      if (dropdown && !dropdown.contains(e.target) && !(btn && btn.contains(e.target))) {
+      const modeBtn = document.querySelector(".mode-btn");
+      if (
+        dropdown &&
+        !dropdown.contains(e.target) &&
+        !(btn && btn.contains(e.target)) &&
+        !(modeBtn && modeBtn.contains(e.target))
+      ) {
         setLangOpen(false);
+        setModeOpen(false);
       }
     }
     document.addEventListener("pointerdown", handlePointerDown, true);
     return () => document.removeEventListener("pointerdown", handlePointerDown, true);
-  }, [langOpen]);
+  }, [langOpen, modeOpen]);
 
   // Resize the overlay window when the dropdown opens or closes.
   useEffect(() => {
-    invoke("set_overlay_height", { height: langOpen ? DROPDOWN_HEIGHT : COMPACT_HEIGHT })
+    const isAnyOpen = langOpen || modeOpen;
+    invoke("set_overlay_height", { height: isAnyOpen ? DROPDOWN_HEIGHT : COMPACT_HEIGHT })
       .catch(() => {});
-  }, [langOpen]);
+  }, [langOpen, modeOpen]);
 
   async function selectLanguage(code) {
     try {
@@ -171,17 +182,23 @@ export default function Overlay() {
     }
   }
 
+  async function selectContextMode(id) {
+    try {
+      await invoke("set_active_context_mode", { id });
+      setActiveModeId(id);
+    } catch (e) {
+      console.error("Failed to set active context mode:", e);
+    } finally {
+      setModeOpen(false);
+    }
+  }
+
   const vertical = isVerticalAnchor(dockAnchor);
   const showSatellites = hovered && effectiveState === "idle";
   const expanded = showSatellites || effectiveState !== "idle";
+  const activeMode = contextModes.find((m) => m.id === activeModeId) || contextModes[0];
 
-  // Drag-to-reposition: press on the resting pill (not while a dictation
-  // is actually in flight — that shouldn't be interruptible by an
-  // accidental drag) starts the gesture; the Rust-side hover-watcher does
-  // the actual window-following (see start_overlay_drag/end_overlay_drag
-  // in desktop.rs). Pointer capture keeps move/up events targeting this
-  // element even once the window has moved out from under the cursor
-  // between polling ticks.
+  // Drag-to-reposition: press on the resting pill
   function onPillPointerDown(e) {
     if (effectiveState !== "idle" || e.button !== 0) return;
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -217,12 +234,48 @@ export default function Overlay() {
         </div>
       )}
 
+      {modeOpen && (
+        <div className="lang-dropdown" role="listbox" style={{ width: "230px" }}>
+          <div style={{ padding: "6px 10px", fontSize: "11px", fontWeight: 600, color: "var(--text-muted)", borderBottom: "1px solid var(--border)" }}>
+            Select Active AI Mode:
+          </div>
+          {contextModes.map((m) => (
+            <div
+              key={m.id}
+              className={`lang-option ${activeModeId === m.id ? "active" : ""}`}
+              onClick={() => selectContextMode(m.id)}
+              role="option"
+              aria-selected={activeModeId === m.id}
+            >
+              <span className="lang-code" style={{ fontSize: "14px" }}>{m.icon}</span>
+              <span className="lang-name">{m.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="pill-row">
+        {showSatellites && (
+          <button
+            className={`sat mode-btn ${modeOpen ? "open" : ""}`}
+            title={`Active Mode: ${activeMode?.name || "Direct Dictation"}`}
+            onClick={() => {
+              setModeOpen((v) => !v);
+              setLangOpen(false);
+            }}
+          >
+            {activeMode?.icon || "⚡"}
+          </button>
+        )}
+
         {showSatellites && (
           <button
             className={`sat lang-btn ${langOpen ? "open" : ""}`}
             title="Change language"
-            onClick={() => setLangOpen((v) => !v)}
+            onClick={() => {
+              setLangOpen((v) => !v);
+              setModeOpen(false);
+            }}
           >
             {langDisplay(lang)}
           </button>

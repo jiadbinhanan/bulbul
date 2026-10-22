@@ -196,6 +196,17 @@ class BulbulForegroundService : Service() {
             } else null
 
             if (transcript != null) {
+                if (transcript.isBlank()) {
+                    Log.i(TAG, "transcript was blank — no audible speech detected")
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        android.widget.Toast.makeText(
+                            this,
+                            "Bulbul: কোনো কথা শোনা যায়নি (মাইক্রোফোন চেক করুন)",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    return@thread
+                }
                 val friendly = friendlyAppName(appPkg)
                 val mode = BulbulConfig.mode(this)
 

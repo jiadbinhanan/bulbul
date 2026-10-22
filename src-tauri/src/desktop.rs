@@ -2642,6 +2642,328 @@ async fn install_staged_update(app: AppHandle) -> Result<(), String> {
     install_update_and_restart(&app, staged)
 }
 
+#[tauri::command]
+fn list_recordings_v2(
+    app: AppHandle,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<db::FullRecordingDetail>, String> {
+    let db = &app.state::<AppState>().db;
+    db::list_full_recordings(db, limit.unwrap_or(50), offset.unwrap_or(0))
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn count_recordings_v2(app: AppHandle) -> Result<u64, String> {
+    let db = &app.state::<AppState>().db;
+    let conn = db.lock();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM recordings", [], |r| r.get(0))
+        .unwrap_or(0);
+    Ok(count as u64)
+}
+
+#[tauri::command]
+fn get_full_recording_v2(
+    app: AppHandle,
+    id: String,
+) -> Result<Option<db::FullRecordingDetail>, String> {
+    let db = &app.state::<AppState>().db;
+    db::get_full_recording(db, &id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn delete_recording_v2(
+    app: AppHandle,
+    id: String,
+) -> Result<(), String> {
+    let db = &app.state::<AppState>().db;
+    db::delete_recording(db, &id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn toggle_recording_pinned(
+    app: AppHandle,
+    id: String,
+) -> Result<bool, String> {
+    let db = &app.state::<AppState>().db;
+    db::toggle_recording_pinned(db, &id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn list_vocabulary_profiles(
+    app: AppHandle,
+) -> Result<Vec<db::VocabularyProfileRow>, String> {
+    let db = &app.state::<AppState>().db;
+    db::list_vocabulary_profiles(db).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn save_vocabulary_profile(
+    app: AppHandle,
+    id: Option<i64>,
+    name: String,
+    description: String,
+    terms: Vec<String>,
+    is_active: bool,
+) -> Result<i64, String> {
+    let db = &app.state::<AppState>().db;
+    db::save_vocabulary_profile(db, id, &name, &description, &terms, is_active)
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn toggle_vocabulary_profile(
+    app: AppHandle,
+    id: i64,
+) -> Result<bool, String> {
+    let db = &app.state::<AppState>().db;
+    db::toggle_vocabulary_profile(db, id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn delete_vocabulary_profile(
+    app: AppHandle,
+    id: i64,
+) -> Result<(), String> {
+    let db = &app.state::<AppState>().db;
+    db::delete_vocabulary_profile(db, id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn list_context_modes(
+    app: AppHandle,
+) -> Result<Vec<db::ContextModeRow>, String> {
+    let db = &app.state::<AppState>().db;
+    db::list_context_modes(db).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn get_context_mode(
+    app: AppHandle,
+    id: i64,
+) -> Result<Option<db::ContextModeRow>, String> {
+    let db = &app.state::<AppState>().db;
+    db::get_context_mode(db, id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn save_context_mode(
+    app: AppHandle,
+    id: Option<i64>,
+    name: String,
+    icon: String,
+    system_prompt: String,
+    default_phase1_mode: String,
+    phase2_enabled: bool,
+    phase2_provider: String,
+    phase2_model: String,
+    thinking_level: Option<String>,
+    hotkey: Option<String>,
+    sort_order: Option<i64>,
+) -> Result<i64, String> {
+    let db = &app.state::<AppState>().db;
+    db::save_context_mode(
+        db,
+        id,
+        &name,
+        &icon,
+        &system_prompt,
+        &default_phase1_mode,
+        phase2_enabled,
+        &phase2_provider,
+        &phase2_model,
+        thinking_level.as_deref(),
+        hotkey.as_deref(),
+        sort_order.unwrap_or(0),
+    )
+    .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn delete_context_mode(
+    app: AppHandle,
+    id: i64,
+) -> Result<(), String> {
+    let db = &app.state::<AppState>().db;
+    db::delete_context_mode(db, id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn set_active_context_mode(
+    app: AppHandle,
+    id: i64,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let mut cfg = state.config.lock();
+    cfg.active_context_mode_id = id;
+    config::save(&cfg).map_err(|e| format!("{e:#}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_recording_audio_bytes(
+    recording_id: String,
+) -> Result<String, String> {
+    let dir = config::recordings_dir().map_err(|e| format!("{e:#}"))?;
+    let path = dir.join(format!("{recording_id}.wav"));
+    let bytes = std::fs::read(&path).map_err(|e| format!("reading audio file: {e:#}"))?;
+    let b64 = BASE64.encode(&bytes);
+    Ok(format!("data:audio/wav;base64,{b64}"))
+}
+
+#[tauri::command]
+async fn rerun_transcription(
+    app: AppHandle,
+    recording_id: String,
+    provider: String,
+    model: String,
+    mode: String,
+    custom_vocabulary: Option<Vec<String>>,
+) -> Result<db::TranscriptionTryRow, String> {
+    let state = app.state::<AppState>();
+    let cfg = state.config.lock().clone();
+    let db = state.db.clone();
+
+    let dir = config::recordings_dir().map_err(|e| format!("{e:#}"))?;
+    let path = dir.join(format!("{recording_id}.wav"));
+    let wav = std::fs::read(&path).map_err(|e| format!("reading audio file: {e:#}"))?;
+
+    let vocab = custom_vocabulary.unwrap_or_default();
+    let is_coding = mode.to_lowercase().contains("tech") || mode.to_lowercase().contains("code");
+
+    let t_start = Instant::now();
+    let transcript = if provider.to_lowercase() == "gemini" {
+        gemini::transcribe(&cfg, wav, &vocab, is_coding, Some(&mode))
+            .await
+            .map_err(|e| format!("{e:#}"))?
+    } else {
+        groq::transcribe(&cfg, wav, &vocab, None)
+            .await
+            .map_err(|e| format!("{e:#}"))?
+    };
+    let latency_ms = t_start.elapsed().as_millis() as u64;
+
+    let language_codes = if provider.to_lowercase() == "gemini" {
+        vec!["bn-IN".to_string(), "en-IN".to_string()]
+    } else {
+        vec!["en".to_string()]
+    };
+
+    let try_id = db::save_transcription_try(
+        &db,
+        &recording_id,
+        &provider,
+        &model,
+        &mode,
+        &language_codes,
+        &[],
+        &transcript,
+        latency_ms,
+    )
+    .map_err(|e| format!("{e:#}"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    Ok(db::TranscriptionTryRow {
+        id: try_id,
+        recording_id,
+        provider,
+        model,
+        mode,
+        language_codes,
+        vocabulary_profile_ids: vec![],
+        transcript_text: transcript,
+        latency_ms,
+        created_at: now,
+    })
+}
+
+#[tauri::command]
+async fn rerun_post_process(
+    app: AppHandle,
+    recording_id: String,
+    transcription_try_id: i64,
+    mode_name: String,
+    provider: String,
+    model: String,
+    thinking_level: Option<String>,
+    prompt: String,
+) -> Result<db::PostProcessTryRow, String> {
+    let state = app.state::<AppState>();
+    let cfg = state.config.lock().clone();
+    let db = state.db.clone();
+
+    let full = db::get_full_recording(&db, &recording_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| "Recording not found".to_string())?;
+
+    let trans_try = full
+        .transcription_tries
+        .into_iter()
+        .find(|t| t.id == transcription_try_id)
+        .ok_or_else(|| "Transcription try not found".to_string())?;
+
+    let t_start = Instant::now();
+    let output = if provider.to_lowercase() == "gemini" {
+        gemini::post_process(
+            &cfg,
+            &model,
+            &prompt,
+            &trans_try.transcript_text,
+            thinking_level.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?
+    } else {
+        groq::post_process(
+            &cfg,
+            &model,
+            &prompt,
+            &trans_try.transcript_text,
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?
+    };
+    let latency_ms = t_start.elapsed().as_millis() as u64;
+
+    let try_id = db::save_post_process_try(
+        &db,
+        &recording_id,
+        transcription_try_id,
+        &mode_name,
+        &provider,
+        &model,
+        thinking_level.as_deref(),
+        &prompt,
+        &output,
+        latency_ms,
+    )
+    .map_err(|e| format!("{e:#}"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    Ok(db::PostProcessTryRow {
+        id: try_id,
+        recording_id,
+        transcription_try_id,
+        mode_name,
+        provider,
+        model,
+        thinking_level,
+        prompt_snapshot: prompt,
+        output_text: output,
+        latency_ms,
+        created_at: now,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // webkit2gtk's DMA-BUF renderer is a recurring source of blank or
@@ -2807,6 +3129,23 @@ pub fn run() {
             update_note,
             delete_note,
             open_scratchpad,
+            list_recordings_v2,
+            count_recordings_v2,
+            get_full_recording_v2,
+            delete_recording_v2,
+            toggle_recording_pinned,
+            list_vocabulary_profiles,
+            save_vocabulary_profile,
+            toggle_vocabulary_profile,
+            delete_vocabulary_profile,
+            list_context_modes,
+            get_context_mode,
+            save_context_mode,
+            delete_context_mode,
+            set_active_context_mode,
+            get_recording_audio_bytes,
+            rerun_transcription,
+            rerun_post_process,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -3933,14 +4272,39 @@ async fn process_pipeline(
 ) {
     let t_pipeline_start = Instant::now();
     let audio_bytes = wav.len();
-    // Hand the dictionary's canonical spellings to Whisper as a prompt hint —
-    // biases the STT toward the user's preferred forms (e.g. "Groq", "iOS").
     let db = app.state::<AppState>().db.clone();
-    let vocabulary: Vec<String> = db::list_dictionary(&db)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|e| e.to_word)
-        .collect();
+
+    // Persist audio WAV file to disk: {recordings_dir}/{recording_id}.wav
+    let recording_id = uuid::Uuid::new_v4().to_string();
+    let audio_file_name = format!("{recording_id}.wav");
+    if let Ok(dir) = config::recordings_dir() {
+        let p = dir.join(&audio_file_name);
+        if let Err(e) = std::fs::write(&p, &wav) {
+            tracing::error!("failed to write recording to disk: {e:#}");
+        }
+    }
+    let _ = db::save_recording(
+        &db,
+        &recording_id,
+        &audio_file_name,
+        duration_ms,
+        audio_bytes as u64,
+        false,
+    );
+
+    // Active Context Mode & Vocabulary Profiles
+    let context_mode = db::get_context_mode(&db, cfg.active_context_mode_id).ok().flatten()
+        .or_else(|| db::list_context_modes(&db).ok().and_then(|modes| modes.into_iter().next()));
+
+    let (active_vocab_terms, active_vocab_ids) = db::get_active_vocabulary_terms(&db).unwrap_or_default();
+    let mut vocabulary = active_vocab_terms;
+    if let Ok(dict) = db::list_dictionary(&db) {
+        for entry in dict {
+            if !vocabulary.contains(&entry.to_word) {
+                vocabulary.push(entry.to_word);
+            }
+        }
+    }
 
     // Shared across STT + cleanup: tell the overlay we're backing off on a
     // Groq rate limit instead of letting the dictation appear to hang.
@@ -3950,12 +4314,17 @@ async fn process_pipeline(
     };
     let notify_rl: &groq::RetryNotify = &on_rate_limit;
 
+    let phase1_mode = context_mode
+        .as_ref()
+        .map(|m| m.default_phase1_mode.as_str())
+        .unwrap_or("smart");
+
     let is_bengali_gemini = cfg.language == "bn-IN" || cfg.language == "bn-IN-tech";
-    let is_coding = cfg.language == "bn-IN-tech";
+    let is_coding = cfg.language == "bn-IN-tech" || context_mode.as_ref().map(|m| m.name.to_lowercase().contains("code")).unwrap_or(false);
 
     let t_stt_start = Instant::now();
     let transcript = if is_bengali_gemini {
-        match gemini::transcribe(&cfg, wav, &vocabulary, is_coding).await {
+        match gemini::transcribe(&cfg, wav.clone(), &vocabulary, is_coding, Some(phase1_mode)).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!("Gemini STT failed: {e:#}");
@@ -3966,7 +4335,7 @@ async fn process_pipeline(
             }
         }
     } else {
-        match groq::transcribe(&cfg, wav, &vocabulary, Some(notify_rl)).await {
+        match groq::transcribe(&cfg, wav.clone(), &vocabulary, Some(notify_rl)).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!("STT failed: {e:#}");
@@ -3979,16 +4348,29 @@ async fn process_pipeline(
     };
     let t_stt_ms = t_stt_start.elapsed().as_millis() as u64;
     tracing::debug!("raw transcript: {transcript}");
+
+    let provider_name = if is_bengali_gemini { "gemini" } else { "groq" };
+    let model_name = if is_bengali_gemini { "gemini-3.5-transcribe" } else { "whisper-large-v3" };
+    let language_codes = if is_bengali_gemini {
+        vec!["bn-IN".to_string(), "en-IN".to_string()]
+    } else {
+        vec![cfg.language.clone()]
+    };
+
+    let transcription_try_id = db::save_transcription_try(
+        &db,
+        &recording_id,
+        provider_name,
+        model_name,
+        phase1_mode,
+        &language_codes,
+        &active_vocab_ids,
+        &transcript,
+        t_stt_ms,
+    ).unwrap_or(0);
+
     if transcript.trim().is_empty() || (!is_bengali_gemini && groq::is_likely_hallucination(&transcript)) {
         tracing::info!("dropping empty or likely-hallucinated transcript: {transcript:?}");
-        // Persist the rejected transcript so users can see WHAT Whisper
-        // returned when their hotkey produced no output. If history shows
-        // "thanks for watching" / "thank you" / "music", that's diagnostic
-        // gold — it means the mic captured silent or near-silent audio and
-        // Whisper hallucinated. The user can then fix their mic device
-        // routing or hotkey conflict instead of staring at an empty UI.
-        // raw_text and cleaned_text both carry the hallucinated phrase
-        // (no cleanup ran); empty cleaned_text would hide the diagnostic.
         let _ = db::log_dictation_with_hits(
             &db,
             db::LogEntry {
@@ -4007,7 +4389,60 @@ async fn process_pipeline(
         return;
     }
 
-    let (cleaned, t_cleanup_ms) = if is_bengali_gemini {
+    let should_post_process = context_mode
+        .as_ref()
+        .map(|m| m.phase2_enabled)
+        .unwrap_or(false);
+
+    let (cleaned, t_cleanup_ms): (String, u64) = if should_post_process {
+        let cm = context_mode.as_ref().unwrap();
+        emit_status(&app, "processing", Some(format!("Formatting with {}...", cm.phase2_provider)));
+        let t_p2_start = Instant::now();
+        let p2_result = if cm.phase2_provider.to_lowercase() == "gemini" {
+            gemini::post_process(
+                &cfg,
+                &cm.phase2_model,
+                &cm.system_prompt,
+                &transcript,
+                cm.thinking_level.as_deref(),
+            ).await
+        } else {
+            groq::post_process(
+                &cfg,
+                &cm.phase2_model,
+                &cm.system_prompt,
+                &transcript,
+            ).await
+        };
+        let p2_latency_ms = t_p2_start.elapsed().as_millis() as u64;
+
+        match p2_result {
+            Ok(output) if !output.trim().is_empty() => {
+                let _ = db::save_post_process_try(
+                    &db,
+                    &recording_id,
+                    transcription_try_id,
+                    &cm.name,
+                    &cm.phase2_provider,
+                    &cm.phase2_model,
+                    cm.thinking_level.as_deref(),
+                    &cm.system_prompt,
+                    &output,
+                    p2_latency_ms,
+                );
+                (output, p2_latency_ms)
+            }
+            Ok(_) => {
+                tracing::warn!("Phase 2 returned empty text, falling back to Phase 1 transcript");
+                (transcript.clone(), p2_latency_ms)
+            }
+            Err(e) => {
+                tracing::warn!("Phase 2 post-processing failed, falling back to Phase 1 transcript: {e:#}");
+                notify(&app, "Bulbul post-process warning", &format!("Formatting failed, pasted raw transcript: {e:#}"));
+                (transcript.clone(), p2_latency_ms)
+            }
+        }
+    } else if is_bengali_gemini {
         // Gemini 3.5 Transcribe in SMART mode performs disfluency removal,
         // punctuation, and capitalization in a single pass. We bypass the
         // second LLM network call to cut latency in half while letting
@@ -4093,7 +4528,7 @@ async fn process_pipeline(
         let cleanup_ms = t_cleanup_start.elapsed().as_millis() as u64;
         (cleaned_res, cleanup_ms)
     };
-    tracing::debug!("cleaned: {cleaned}");
+    tracing::debug!("cleaned: {}", cleaned);
 
     let t_local_start = Instant::now();
     let regex_cache = app.state::<AppState>().regex_cache.clone();

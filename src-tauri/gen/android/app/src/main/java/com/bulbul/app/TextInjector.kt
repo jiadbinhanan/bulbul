@@ -145,11 +145,15 @@ object TextInjector {
             }
             for (w in windows) {
                 val root = w.root ?: continue
-                dfs(root, 0) { it.isEditable && !it.isPassword && it.isFocused }?.let { return it }
+                val found = dfs(root, 0) { it.isEditable && !it.isPassword && it.isFocused }
+                if (found != null) return found
+                root.recycle()
             }
             for (w in windows) {
                 val root = w.root ?: continue
-                dfs(root, 0) { it.isEditable && !it.isPassword }?.let { return it }
+                val found = dfs(root, 0) { it.isEditable && !it.isPassword }
+                if (found != null) return found
+                root.recycle()
             }
             null
         } catch (t: Throwable) {

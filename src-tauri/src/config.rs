@@ -311,7 +311,24 @@ pub struct Config {
     /// in minutes (Android only). Default 1 hour.
     #[serde(default = "default_overlay_snooze_minutes")]
     pub overlay_snooze_minutes: u32,
+
+    /// Active Context Mode ID (default: 1 - Direct Smart Dictation).
+    #[serde(default = "default_active_context_mode_id")]
+    pub active_context_mode_id: i64,
+
+    /// Phase 1 Transcription Mode: "SMART" (default) or "VERBATIM".
+    #[serde(default = "default_phase1_mode")]
+    pub phase1_mode: String,
+
+    /// Whether Phase 2 Post-Processing is enabled globally / on active dictation.
+    #[serde(default = "default_phase2_enabled")]
+    pub phase2_enabled: bool,
 }
+
+fn default_active_context_mode_id() -> i64 { 1 }
+fn default_phase1_mode() -> String { "SMART".to_string() }
+fn default_phase2_enabled() -> bool { false }
+
 
 fn default_polish_hotkey() -> String {
     // Shift+Alt+P. Chosen to NOT share modifiers with the typical
@@ -617,6 +634,9 @@ impl Default for Config {
             overlay_opacity: default_overlay_opacity(),
             overlay_size: default_overlay_size(),
             overlay_snooze_minutes: default_overlay_snooze_minutes(),
+            active_context_mode_id: default_active_context_mode_id(),
+            phase1_mode: default_phase1_mode(),
+            phase2_enabled: default_phase2_enabled(),
         }
     }
 }
@@ -686,6 +706,12 @@ pub fn config_dir() -> Result<PathBuf> {
 
 pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.json"))
+}
+
+pub fn recordings_dir() -> Result<PathBuf> {
+    let dir = config_dir()?.join("recordings");
+    fs::create_dir_all(&dir).with_context(|| format!("creating {:?}", dir))?;
+    Ok(dir)
 }
 
 pub fn load() -> Config {

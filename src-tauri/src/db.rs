@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use regex::{Regex, RegexBuilder};
 use rusqlite::{params, Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -97,6 +97,76 @@ CREATE TABLE IF NOT EXISTS correction_dismissals (
     from_word   TEXT NOT NULL,
     to_word     TEXT NOT NULL,
     PRIMARY KEY (from_word, to_word)
+);
+
+CREATE TABLE IF NOT EXISTS recordings (
+    id                  TEXT PRIMARY KEY,
+    audio_file_path     TEXT NOT NULL,
+    duration_ms         INTEGER NOT NULL,
+    file_size_bytes     INTEGER NOT NULL,
+    created_at          INTEGER NOT NULL,
+    is_pinned           INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_recordings_created ON recordings(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS transcription_tries (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    recording_id            TEXT NOT NULL,
+    provider                TEXT NOT NULL,
+    model                   TEXT NOT NULL,
+    mode                    TEXT NOT NULL,
+    language_codes          TEXT NOT NULL,
+    vocabulary_profile_ids  TEXT NOT NULL DEFAULT '[]',
+    transcript_text         TEXT NOT NULL,
+    latency_ms              INTEGER NOT NULL,
+    created_at              INTEGER NOT NULL,
+    FOREIGN KEY(recording_id) REFERENCES recordings(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_transcription_recording ON transcription_tries(recording_id);
+
+CREATE TABLE IF NOT EXISTS post_process_tries (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    recording_id            TEXT NOT NULL,
+    transcription_try_id    INTEGER NOT NULL,
+    mode_name               TEXT NOT NULL,
+    provider                TEXT NOT NULL,
+    model                   TEXT NOT NULL,
+    thinking_level          TEXT,
+    prompt_snapshot         TEXT NOT NULL,
+    output_text             TEXT NOT NULL,
+    latency_ms              INTEGER NOT NULL,
+    created_at              INTEGER NOT NULL,
+    FOREIGN KEY(recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
+    FOREIGN KEY(transcription_try_id) REFERENCES transcription_tries(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_post_process_try ON post_process_tries(transcription_try_id);
+CREATE INDEX IF NOT EXISTS idx_post_process_recording ON post_process_tries(recording_id);
+
+CREATE TABLE IF NOT EXISTS vocabulary_profiles (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    terms_json      TEXT NOT NULL,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS context_modes (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                    TEXT NOT NULL,
+    icon                    TEXT NOT NULL,
+    system_prompt           TEXT NOT NULL,
+    default_phase1_mode     TEXT NOT NULL DEFAULT 'SMART',
+    phase2_enabled          INTEGER NOT NULL DEFAULT 1,
+    phase2_provider         TEXT NOT NULL DEFAULT 'gemini',
+    phase2_model            TEXT NOT NULL DEFAULT 'gemini-3.8-flash',
+    thinking_level          TEXT DEFAULT 'medium',
+    hotkey                  TEXT,
+    sort_order              INTEGER NOT NULL DEFAULT 0,
+    created_at              INTEGER NOT NULL
 );
 "#;
 
@@ -236,6 +306,8 @@ pub fn open() -> Result<Db> {
     migrate(&conn).context("running migrations")?;
     seed_default_dictionary(&conn).context("seeding dictionary defaults")?;
     seed_default_transforms(&conn).context("seeding transform defaults")?;
+    seed_default_vocabulary_profiles(&conn).context("seeding vocabulary profiles")?;
+    seed_default_context_modes(&conn).context("seeding context modes")?;
     Ok(Arc::new(Mutex::new(conn)))
 }
 
@@ -297,6 +369,146 @@ fn seed_default_dictionary(conn: &Connection) -> Result<()> {
         )?;
     }
     tracing::info!("seeded {} default dictionary entries", DEFAULT_DICTIONARY.len());
+    Ok(())
+}
+
+fn seed_default_vocabulary_profiles(conn: &Connection) -> Result<()> {
+    let existing: i64 = conn
+        .query_row("SELECT COUNT(*) FROM vocabulary_profiles", [], |r| r.get(0))
+        .unwrap_or(0);
+    if existing > 0 {
+        return Ok(());
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let dev_terms = serde_json::to_string(crate::gemini::BANGLISH_CODING_VOCABULARY)?;
+    conn.execute(
+        "INSERT INTO vocabulary_profiles (name, description, terms_json, is_active, created_at)
+         VALUES (?, ?, ?, 1, ?)",
+        params![
+            "Full-Stack Dev Stack",
+            "Modern web, backend, database and cloud developer terminology for coding and prompt crafting",
+            dev_terms,
+            now
+        ],
+    )?;
+
+    let biz_terms = serde_json::to_string(&[
+        "Invoice", "Contract", "Deliverable", "Milestone", "Requirement", "Deadline",
+        "Proposal", "Client", "Meeting", "Sprint", "Budget", "Scope", "Stakeholder"
+    ])?;
+    conn.execute(
+        "INSERT INTO vocabulary_profiles (name, description, terms_json, is_active, created_at)
+         VALUES (?, ?, ?, 1, ?)",
+        params![
+            "Business & Client",
+            "Contracts, billing, milestones, and client communications",
+            biz_terms,
+            now
+        ],
+    )?;
+
+    let proper_nouns = serde_json::to_string(&[
+        "Bulbul", "Anti-Gravity", "AI Studio", "Google", "WhatsApp", "YouTube", "Facebook", "LinkedIn"
+    ])?;
+    conn.execute(
+        "INSERT INTO vocabulary_profiles (name, description, terms_json, is_active, created_at)
+         VALUES (?, ?, ?, 1, ?)",
+        params![
+            "Slang & Proper Nouns",
+            "Common platform names and brand terminology",
+            proper_nouns,
+            now
+        ],
+    )?;
+
+    tracing::info!("seeded default vocabulary profiles");
+    Ok(())
+}
+
+fn seed_default_context_modes(conn: &Connection) -> Result<()> {
+    let existing: i64 = conn
+        .query_row("SELECT COUNT(*) FROM context_modes", [], |r| r.get(0))
+        .unwrap_or(0);
+    if existing > 0 {
+        return Ok(());
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let modes: &[(&str, &str, &str, &str, i32, &str, &str, Option<&str>, i64)] = &[
+        (
+            "Direct Smart Dictation",
+            "mic",
+            "Direct smart dictation without secondary LLM pass.",
+            "SMART",
+            0,
+            "gemini",
+            "gemini-3.5-transcribe",
+            None,
+            0,
+        ),
+        (
+            "Coding Agent Prompt",
+            "code",
+            "You are an expert AI prompt engineer for modern coding IDEs (such as Cursor and Anti-Gravity). The user dictates instructions in a mix of Bengali and English technical concepts. Convert the user's spoken thoughts into a crisp, logically structured, and technically precise coding prompt in English. Keep all programming terms, framework names, variable names, and file paths in exact English. Output ONLY the refined prompt text with no conversational preamble or quotes.",
+            "SMART",
+            1,
+            "gemini",
+            "gemini-3.8-flash",
+            Some("medium"),
+            1,
+        ),
+        (
+            "Professional Email",
+            "mail",
+            "You are a professional executive writing assistant. The user will dictate an email draft in Bengali or Banglish. Rewrite it into a polished, respectful, and articulate professional email in fluent English. Keep all key details, deadlines, and action items intact. Return ONLY the finalized email text with a clear Subject line and formatted body.",
+            "SMART",
+            1,
+            "gemini",
+            "gemini-3.5-flash-lite",
+            Some("minimal"),
+            2,
+        ),
+        (
+            "Natural Chat",
+            "message",
+            "Format the spoken speech for natural messaging/chatting. Keep informal Bengali words in clean, properly punctuated Bengali script, while preserving English conversational terms and technical slang in English letters. Do NOT make it artificially stiff or formal. Return ONLY the natural chat message.",
+            "SMART",
+            1,
+            "gemini",
+            "gemini-3.5-flash-lite",
+            Some("minimal"),
+            3,
+        ),
+        (
+            "Direct Translation",
+            "translate",
+            "You are a bilingual translator. Translate the dictated Bengali or Banglish text into fluent, grammatically flawless, natural English. Preserve the speaker's original intent, tone, and emphasis. Return ONLY the English translation without preamble or notes.",
+            "SMART",
+            1,
+            "groq",
+            "llama-3.3-70b-versatile",
+            None,
+            4,
+        ),
+    ];
+
+    for (name, icon, prompt, p1_mode, p2_on, p2_prov, p2_model, thinking, sort) in modes {
+        conn.execute(
+            "INSERT INTO context_modes
+                (name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, sort_order, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![name, icon, prompt, p1_mode, p2_on, p2_prov, p2_model, thinking, sort, now],
+        )?;
+    }
+
+    tracing::info!("seeded default context modes");
     Ok(())
 }
 
@@ -2099,3 +2311,538 @@ fn compute_streak(conn: &Connection) -> i64 {
     }
     streak
 }
+
+// =========================================================================
+// Milestone 2 & 3: V2 Multi-Try Relational Architecture & Vocabulary Profiles
+// =========================================================================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RecordingRow {
+    pub id: String,
+    pub audio_file_path: String,
+    pub duration_ms: u64,
+    pub file_size_bytes: u64,
+    pub created_at: i64,
+    pub is_pinned: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TranscriptionTryRow {
+    pub id: i64,
+    pub recording_id: String,
+    pub provider: String,
+    pub model: String,
+    pub mode: String,
+    pub language_codes: Vec<String>,
+    pub vocabulary_profile_ids: Vec<i64>,
+    pub transcript_text: String,
+    pub latency_ms: u64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PostProcessTryRow {
+    pub id: i64,
+    pub recording_id: String,
+    pub transcription_try_id: i64,
+    pub mode_name: String,
+    pub provider: String,
+    pub model: String,
+    pub thinking_level: Option<String>,
+    pub prompt_snapshot: String,
+    pub output_text: String,
+    pub latency_ms: u64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VocabularyProfileRow {
+    pub id: i64,
+    pub name: String,
+    pub description: String,
+    pub terms: Vec<String>,
+    pub is_active: bool,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ContextModeRow {
+    pub id: i64,
+    pub name: String,
+    pub icon: String,
+    pub system_prompt: String,
+    pub default_phase1_mode: String,
+    pub phase2_enabled: bool,
+    pub phase2_provider: String,
+    pub phase2_model: String,
+    pub thinking_level: Option<String>,
+    pub hotkey: Option<String>,
+    pub sort_order: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FullRecordingDetail {
+    pub recording: RecordingRow,
+    pub transcription_tries: Vec<TranscriptionTryRow>,
+    pub post_process_tries: Vec<PostProcessTryRow>,
+}
+
+pub fn save_recording(
+    db: &Db,
+    id: &str,
+    audio_file_path: &str,
+    duration_ms: u64,
+    file_size_bytes: u64,
+    is_pinned: bool,
+) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let conn = db.lock();
+    conn.execute(
+        "INSERT INTO recordings (id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned)
+         VALUES (?, ?, ?, ?, ?, ?)",
+        params![id, audio_file_path, duration_ms as i64, file_size_bytes as i64, now, if is_pinned { 1 } else { 0 }],
+    ).context("inserting recording")?;
+    Ok(())
+}
+
+pub fn save_transcription_try(
+    db: &Db,
+    recording_id: &str,
+    provider: &str,
+    model: &str,
+    mode: &str,
+    language_codes: &[String],
+    vocabulary_profile_ids: &[i64],
+    transcript_text: &str,
+    latency_ms: u64,
+) -> Result<i64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let lang_json = serde_json::to_string(language_codes)?;
+    let vocab_json = serde_json::to_string(vocabulary_profile_ids)?;
+    let conn = db.lock();
+    conn.execute(
+        "INSERT INTO transcription_tries
+            (recording_id, provider, model, mode, language_codes, vocabulary_profile_ids, transcript_text, latency_ms, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![recording_id, provider, model, mode, lang_json, vocab_json, transcript_text, latency_ms as i64, now],
+    ).context("inserting transcription try")?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn save_post_process_try(
+    db: &Db,
+    recording_id: &str,
+    transcription_try_id: i64,
+    mode_name: &str,
+    provider: &str,
+    model: &str,
+    thinking_level: Option<&str>,
+    prompt_snapshot: &str,
+    output_text: &str,
+    latency_ms: u64,
+) -> Result<i64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let conn = db.lock();
+    conn.execute(
+        "INSERT INTO post_process_tries
+            (recording_id, transcription_try_id, mode_name, provider, model, thinking_level, prompt_snapshot, output_text, latency_ms, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        params![recording_id, transcription_try_id, mode_name, provider, model, thinking_level, prompt_snapshot, output_text, latency_ms as i64, now],
+    ).context("inserting post-process try")?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<FullRecordingDetail>> {
+    let conn = db.lock();
+    let mut stmt = conn.prepare(
+        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned
+         FROM recordings
+         ORDER BY created_at DESC
+         LIMIT ? OFFSET ?",
+    )?;
+    let recording_rows = stmt
+        .query_map(params![limit, offset], |row| {
+            Ok(RecordingRow {
+                id: row.get(0)?,
+                audio_file_path: row.get(1)?,
+                duration_ms: row.get::<_, i64>(2)? as u64,
+                file_size_bytes: row.get::<_, i64>(3)? as u64,
+                created_at: row.get(4)?,
+                is_pinned: row.get::<_, i64>(5)? != 0,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut details = Vec::new();
+    for rec in recording_rows {
+        let mut t_stmt = conn.prepare(
+            "SELECT id, recording_id, provider, model, mode, language_codes, vocabulary_profile_ids, transcript_text, latency_ms, created_at
+             FROM transcription_tries
+             WHERE recording_id = ?
+             ORDER BY created_at ASC",
+        )?;
+        let tries = t_stmt
+            .query_map([&rec.id], |row| {
+                let lang_str: String = row.get(5)?;
+                let vocab_str: String = row.get(6)?;
+                Ok(TranscriptionTryRow {
+                    id: row.get(0)?,
+                    recording_id: row.get(1)?,
+                    provider: row.get(2)?,
+                    model: row.get(3)?,
+                    mode: row.get(4)?,
+                    language_codes: serde_json::from_str(&lang_str).unwrap_or_default(),
+                    vocabulary_profile_ids: serde_json::from_str(&vocab_str).unwrap_or_default(),
+                    transcript_text: row.get(7)?,
+                    latency_ms: row.get::<_, i64>(8)? as u64,
+                    created_at: row.get(9)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut p_stmt = conn.prepare(
+            "SELECT id, recording_id, transcription_try_id, mode_name, provider, model, thinking_level, prompt_snapshot, output_text, latency_ms, created_at
+             FROM post_process_tries
+             WHERE recording_id = ?
+             ORDER BY created_at ASC",
+        )?;
+        let post_tries = p_stmt
+            .query_map([&rec.id], |row| {
+                Ok(PostProcessTryRow {
+                    id: row.get(0)?,
+                    recording_id: row.get(1)?,
+                    transcription_try_id: row.get(2)?,
+                    mode_name: row.get(3)?,
+                    provider: row.get(4)?,
+                    model: row.get(5)?,
+                    thinking_level: row.get(6)?,
+                    prompt_snapshot: row.get(7)?,
+                    output_text: row.get(8)?,
+                    latency_ms: row.get::<_, i64>(9)? as u64,
+                    created_at: row.get(10)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        details.push(FullRecordingDetail {
+            recording: rec,
+            transcription_tries: tries,
+            post_process_tries: post_tries,
+        });
+    }
+
+    Ok(details)
+}
+
+pub fn get_full_recording(db: &Db, recording_id: &str) -> Result<Option<FullRecordingDetail>> {
+    let conn = db.lock();
+    let mut stmt = conn.prepare(
+        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned
+         FROM recordings
+         WHERE id = ?",
+    )?;
+    let mut rec_iter = stmt.query_map([recording_id], |row| {
+        Ok(RecordingRow {
+            id: row.get(0)?,
+            audio_file_path: row.get(1)?,
+            duration_ms: row.get::<_, i64>(2)? as u64,
+            file_size_bytes: row.get::<_, i64>(3)? as u64,
+            created_at: row.get(4)?,
+            is_pinned: row.get::<_, i64>(5)? != 0,
+        })
+    })?;
+
+    let rec = match rec_iter.next() {
+        Some(Ok(r)) => r,
+        _ => return Ok(None),
+    };
+
+    let mut t_stmt = conn.prepare(
+        "SELECT id, recording_id, provider, model, mode, language_codes, vocabulary_profile_ids, transcript_text, latency_ms, created_at
+         FROM transcription_tries
+         WHERE recording_id = ?
+         ORDER BY created_at ASC",
+    )?;
+    let tries = t_stmt
+        .query_map([recording_id], |row| {
+            let lang_str: String = row.get(5)?;
+            let vocab_str: String = row.get(6)?;
+            Ok(TranscriptionTryRow {
+                id: row.get(0)?,
+                recording_id: row.get(1)?,
+                provider: row.get(2)?,
+                model: row.get(3)?,
+                mode: row.get(4)?,
+                language_codes: serde_json::from_str(&lang_str).unwrap_or_default(),
+                vocabulary_profile_ids: serde_json::from_str(&vocab_str).unwrap_or_default(),
+                transcript_text: row.get(7)?,
+                latency_ms: row.get::<_, i64>(8)? as u64,
+                created_at: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut p_stmt = conn.prepare(
+        "SELECT id, recording_id, transcription_try_id, mode_name, provider, model, thinking_level, prompt_snapshot, output_text, latency_ms, created_at
+         FROM post_process_tries
+         WHERE recording_id = ?
+         ORDER BY created_at ASC",
+    )?;
+    let post_tries = p_stmt
+        .query_map([recording_id], |row| {
+            Ok(PostProcessTryRow {
+                id: row.get(0)?,
+                recording_id: row.get(1)?,
+                transcription_try_id: row.get(2)?,
+                mode_name: row.get(3)?,
+                provider: row.get(4)?,
+                model: row.get(5)?,
+                thinking_level: row.get(6)?,
+                prompt_snapshot: row.get(7)?,
+                output_text: row.get(8)?,
+                latency_ms: row.get::<_, i64>(9)? as u64,
+                created_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Some(FullRecordingDetail {
+        recording: rec,
+        transcription_tries: tries,
+        post_process_tries: post_tries,
+    }))
+}
+
+pub fn delete_recording(db: &Db, recording_id: &str) -> Result<()> {
+    let conn = db.lock();
+    let file_path: Option<String> = conn
+        .query_row("SELECT audio_file_path FROM recordings WHERE id = ?", [recording_id], |r| r.get(0))
+        .ok();
+    conn.execute("DELETE FROM recordings WHERE id = ?", [recording_id])?;
+    if let Some(rel) = file_path {
+        if let Ok(dir) = crate::config::recordings_dir() {
+            let p = dir.join(&rel);
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    Ok(())
+}
+
+pub fn toggle_recording_pinned(db: &Db, recording_id: &str) -> Result<bool> {
+    let conn = db.lock();
+    let current: i64 = conn
+        .query_row("SELECT is_pinned FROM recordings WHERE id = ?", [recording_id], |r| r.get(0))
+        .unwrap_or(0);
+    let next = if current == 0 { 1 } else { 0 };
+    conn.execute("UPDATE recordings SET is_pinned = ? WHERE id = ?", params![next, recording_id])?;
+    Ok(next == 1)
+}
+
+pub fn list_vocabulary_profiles(db: &Db) -> Result<Vec<VocabularyProfileRow>> {
+    let conn = db.lock();
+    let mut stmt = conn.prepare(
+        "SELECT id, name, description, terms_json, is_active, created_at
+         FROM vocabulary_profiles
+         ORDER BY id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            let terms_json: String = row.get(3)?;
+            Ok(VocabularyProfileRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                terms: serde_json::from_str(&terms_json).unwrap_or_default(),
+                is_active: row.get::<_, i64>(4)? != 0,
+                created_at: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn save_vocabulary_profile(
+    db: &Db,
+    id: Option<i64>,
+    name: &str,
+    description: &str,
+    terms: &[String],
+    is_active: bool,
+) -> Result<i64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let terms_json = serde_json::to_string(terms)?;
+    let conn = db.lock();
+    let active_int = if is_active { 1 } else { 0 };
+    if let Some(id) = id {
+        conn.execute(
+            "UPDATE vocabulary_profiles
+             SET name = ?, description = ?, terms_json = ?, is_active = ?
+             WHERE id = ?",
+            params![name, description, terms_json, active_int, id],
+        )?;
+        Ok(id)
+    } else {
+        conn.execute(
+            "INSERT INTO vocabulary_profiles (name, description, terms_json, is_active, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+            params![name, description, terms_json, active_int, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+}
+
+pub fn toggle_vocabulary_profile(db: &Db, id: i64) -> Result<bool> {
+    let conn = db.lock();
+    let current: i64 = conn
+        .query_row("SELECT is_active FROM vocabulary_profiles WHERE id = ?", [id], |r| r.get(0))
+        .unwrap_or(1);
+    let next = if current == 0 { 1 } else { 0 };
+    conn.execute("UPDATE vocabulary_profiles SET is_active = ? WHERE id = ?", params![next, id])?;
+    Ok(next == 1)
+}
+
+pub fn delete_vocabulary_profile(db: &Db, id: i64) -> Result<()> {
+    let conn = db.lock();
+    conn.execute("DELETE FROM vocabulary_profiles WHERE id = ?", [id])?;
+    Ok(())
+}
+
+pub fn get_active_vocabulary_terms(db: &Db) -> Result<(Vec<String>, Vec<i64>)> {
+    let conn = db.lock();
+    let mut stmt = conn.prepare("SELECT id, terms_json FROM vocabulary_profiles WHERE is_active = 1")?;
+    let mut all_terms = Vec::new();
+    let mut profile_ids = Vec::new();
+    let rows = stmt.query_map([], |r| {
+        let id: i64 = r.get(0)?;
+        let json: String = r.get(1)?;
+        Ok((id, json))
+    })?;
+    for row in rows {
+        let (id, json) = row?;
+        profile_ids.push(id);
+        let terms: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
+        for t in terms {
+            let trimmed = t.trim().to_string();
+            if !trimmed.is_empty() && !all_terms.contains(&trimmed) {
+                all_terms.push(trimmed);
+            }
+        }
+    }
+    Ok((all_terms, profile_ids))
+}
+
+pub fn list_context_modes(db: &Db) -> Result<Vec<ContextModeRow>> {
+    let conn = db.lock();
+    let mut stmt = conn.prepare(
+        "SELECT id, name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, created_at
+         FROM context_modes
+         ORDER BY sort_order ASC, id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ContextModeRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                icon: row.get(2)?,
+                system_prompt: row.get(3)?,
+                default_phase1_mode: row.get(4)?,
+                phase2_enabled: row.get::<_, i64>(5)? != 0,
+                phase2_provider: row.get(6)?,
+                phase2_model: row.get(7)?,
+                thinking_level: row.get(8)?,
+                hotkey: row.get(9)?,
+                sort_order: row.get(10)?,
+                created_at: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn get_context_mode(db: &Db, id: i64) -> Result<Option<ContextModeRow>> {
+    let conn = db.lock();
+    let mut stmt = conn.prepare(
+        "SELECT id, name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, created_at
+         FROM context_modes
+         WHERE id = ?",
+    )?;
+    let mut iter = stmt.query_map([id], |row| {
+        Ok(ContextModeRow {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            icon: row.get(2)?,
+            system_prompt: row.get(3)?,
+            default_phase1_mode: row.get(4)?,
+            phase2_enabled: row.get::<_, i64>(5)? != 0,
+            phase2_provider: row.get(6)?,
+            phase2_model: row.get(7)?,
+            thinking_level: row.get(8)?,
+            hotkey: row.get(9)?,
+            sort_order: row.get(10)?,
+            created_at: row.get(11)?,
+        })
+    })?;
+    match iter.next() {
+        Some(Ok(m)) => Ok(Some(m)),
+        _ => Ok(None),
+    }
+}
+
+pub fn save_context_mode(
+    db: &Db,
+    id: Option<i64>,
+    name: &str,
+    icon: &str,
+    system_prompt: &str,
+    default_phase1_mode: &str,
+    phase2_enabled: bool,
+    phase2_provider: &str,
+    phase2_model: &str,
+    thinking_level: Option<&str>,
+    hotkey: Option<&str>,
+    sort_order: i64,
+) -> Result<i64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let conn = db.lock();
+    let p2_int = if phase2_enabled { 1 } else { 0 };
+    if let Some(id) = id {
+        conn.execute(
+            "UPDATE context_modes
+             SET name = ?, icon = ?, system_prompt = ?, default_phase1_mode = ?, phase2_enabled = ?, phase2_provider = ?, phase2_model = ?, thinking_level = ?, hotkey = ?, sort_order = ?
+             WHERE id = ?",
+            params![name, icon, system_prompt, default_phase1_mode, p2_int, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, id],
+        )?;
+        Ok(id)
+    } else {
+        conn.execute(
+            "INSERT INTO context_modes
+                (name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![name, icon, system_prompt, default_phase1_mode, p2_int, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+}
+
+pub fn delete_context_mode(db: &Db, id: i64) -> Result<()> {
+    let conn = db.lock();
+    conn.execute("DELETE FROM context_modes WHERE id = ?", [id])?;
+    Ok(())
+}
+

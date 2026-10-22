@@ -1002,3 +1002,66 @@ struct ModelsResponse {
 struct ModelEntry {
     id: String,
 }
+
+/// Runs a Phase 2 LLM post-processing pass using Groq models (e.g. llama-3.3-70b-versatile, qwen-2.5-32b).
+pub async fn post_process(
+    cfg: &Config,
+    model: &str,
+    system_prompt: &str,
+    user_input: &str,
+) -> Result<String> {
+    let key = cfg.groq_api_key.trim();
+    if key.is_empty() {
+        return Err(anyhow!("Groq API key not set for Phase 2 post-processing."));
+    }
+
+    let model_name = if model.trim().is_empty() {
+        "llama-3.3-70b-versatile"
+    } else {
+        model.trim()
+    };
+
+    let client = shared_client();
+    let url = format!("{BASE_URL}/chat/completions");
+
+    let request = ChatRequest {
+        model: model_name,
+        messages: vec![
+            ChatMessage {
+                role: "system",
+                content: system_prompt.to_string(),
+            },
+            ChatMessage {
+                role: "user",
+                content: user_input.to_string(),
+            },
+        ],
+        temperature: 0.3,
+        reasoning_effort: None,
+        max_tokens: Some(2000),
+    };
+
+    let make = || {
+        client
+            .post(url.as_str())
+            .bearer_auth(key)
+            .json(&request)
+    };
+
+    let body = send_once(make)
+        .await
+        .context("sending Phase 2 post-processing request to Groq")?;
+
+    let parsed: ChatResponse = serde_json::from_str(&body)
+        .with_context(|| format!("parsing Groq post-process response: {body}"))?;
+
+    let text = parsed
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| c.message.content)
+        .unwrap_or_default();
+
+    Ok(strip_reasoning(&text).trim().to_string())
+}
+

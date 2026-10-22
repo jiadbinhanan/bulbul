@@ -63,7 +63,7 @@ struct Content<'a> {
 #[serde(rename_all = "camelCase")]
 struct AudioTranscriptionConfig {
     language_codes: Vec<String>,
-    mode: &'static str,
+    mode: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     custom_vocabulary: Vec<String>,
 }
@@ -82,9 +82,19 @@ struct GeminiRequest<'a> {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioTranscription {
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiPart {
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    audio_transcription: Option<AudioTranscription>,
 }
 
 #[derive(Deserialize)]
@@ -114,13 +124,14 @@ struct GeminiError {
     code: Option<u32>,
 }
 
-/// Transcribes audio using Google's `gemini-3.5-transcribe` model in single-pass SMART mode.
-/// Returns already-formatted, punctuated Bengali or Banglish text with no filler words.
+/// Transcribes audio using Google's `gemini-3.5-transcribe` model in SMART or VERBATIM mode.
+/// Returns formatted, punctuated Bengali or Banglish text with no filler words.
 pub async fn transcribe(
     cfg: &Config,
     wav_bytes: Vec<u8>,
     vocabulary: &[String],
     is_coding_mode: bool,
+    mode: Option<&str>,
 ) -> Result<String> {
     let key = cfg.gemini_api_key.trim();
     if key.is_empty() {
@@ -159,6 +170,11 @@ pub async fn transcribe(
 
     let b64_audio = BASE64.encode(&wav_bytes);
 
+    let selected_mode = match mode {
+        Some(m) if m.eq_ignore_ascii_case("verbatim") => "VERBATIM",
+        _ => "SMART",
+    };
+
     let request = GeminiRequest {
         contents: vec![Content {
             role: "user",
@@ -171,8 +187,8 @@ pub async fn transcribe(
         }],
         generation_config: GenerationConfig {
             audio_transcription_config: AudioTranscriptionConfig {
-                language_codes: vec!["bn-IN".to_string()],
-                mode: "SMART",
+                language_codes: vec!["bn-IN".to_string(), "en-IN".to_string()],
+                mode: selected_mode.to_string(),
                 custom_vocabulary: custom_vocab,
             },
         },
@@ -212,11 +228,116 @@ pub async fn transcribe(
         .into_iter()
         .filter_map(|c| c.content)
         .flat_map(|c| c.parts)
-        .map(|p| p.text)
+        .map(|p| {
+            if let Some(at) = p.audio_transcription {
+                if !at.text.is_empty() {
+                    return at.text;
+                }
+            }
+            p.text
+        })
         .collect::<Vec<_>>()
         .join("")
         .trim()
         .to_string();
 
+    tracing::info!("Gemini transcription extracted text ({} chars): '{text}'", text.chars().count());
+
     Ok(text)
 }
+
+/// Runs a Phase 2 LLM post-processing pass using Google Gemini models (e.g. gemini-3.8-flash,
+/// gemini-3.5-flash-lite, gemini-2.5-flash) with optional reasoning / thinking_level control.
+pub async fn post_process(
+    cfg: &Config,
+    model: &str,
+    system_prompt: &str,
+    user_input: &str,
+    thinking_level: Option<&str>,
+) -> Result<String> {
+    let key = cfg.gemini_api_key.trim();
+    if key.is_empty() {
+        return Err(anyhow!("Google Gemini API key not set for Phase 2 post-processing."));
+    }
+
+    let model_name = if model.trim().is_empty() {
+        "gemini-3.8-flash"
+    } else {
+        model.trim()
+    };
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        model_name, key
+    );
+
+    let mut root = serde_json::json!({
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{ "text": user_input }]
+            }
+        ]
+    });
+
+    if !system_prompt.trim().is_empty() {
+        root["systemInstruction"] = serde_json::json!({
+            "parts": [{ "text": system_prompt.trim() }]
+        });
+    }
+
+    let mut gen_config = serde_json::json!({
+        "temperature": 0.3
+    });
+
+    if let Some(level) = thinking_level {
+        let lvl = level.to_lowercase();
+        if lvl == "minimal" || lvl == "low" || lvl == "medium" || lvl == "high" {
+            gen_config["thinkingConfig"] = serde_json::json!({
+                "thinkingLevel": lvl
+            });
+        }
+    }
+    root["generationConfig"] = gen_config;
+
+    let client = shared_client();
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(&root)
+        .send()
+        .await
+        .context("sending Phase 2 post-processing request to Gemini")?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .context("reading Gemini post-process response")?;
+
+    if !status.is_success() {
+        return Err(anyhow!("Gemini post-process failed ({status}): {body}"));
+    }
+
+    let val: serde_json::Value = serde_json::from_str(&body)
+        .with_context(|| format!("parsing Gemini post-process JSON: {body}"))?;
+
+    let mut output = String::new();
+    if let Some(candidates) = val["candidates"].as_array() {
+        if let Some(first) = candidates.first() {
+            if let Some(parts) = first["content"]["parts"].as_array() {
+                for part in parts {
+                    if part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        continue;
+                    }
+                    if let Some(txt) = part["text"].as_str() {
+                        output.push_str(txt);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(output.trim().to_string())
+}
+

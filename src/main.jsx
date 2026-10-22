@@ -19,6 +19,18 @@ function renderError(label, err) {
 }
 
 (async () => {
+  if (typeof window !== "undefined" && !window.__TAURI_INTERNALS__) {
+    root.render(
+      <div style={{ padding: 40, color: "#e6e6e6", background: "#0e0e0e", minHeight: "100vh", fontFamily: "system-ui", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center" }}>
+        <h2 style={{ margin: "0 0 16px 0", color: "#5EC8C0" }}>Bulbul একটি ডেস্কটপ অ্যাপ্লিকেশন</h2>
+        <p style={{ maxWidth: 480, lineHeight: 1.6, color: "#aaa", margin: 0, fontSize: 14 }}>
+          আপনি এটি একটি সাধারণ ব্রাউজারে (Microsoft Edge) খুলেছেন। Bulbul উইন্ডোজের নেটিভ অ্যাপ হিসেবে চলে। অনুগ্রহ করে আপনার উইন্ডোজ ডেস্কটপে মূল Bulbul অ্যাপ উইন্ডোটি দেখুন।
+        </p>
+      </div>
+    );
+    return;
+  }
+
   let label = "main";
   try {
     label = getCurrentWindow().label;

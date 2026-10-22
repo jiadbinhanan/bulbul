@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import HomeView from "./views/HomeView.jsx";
+import HistoryView from "./views/HistoryView.jsx";
 import SettingsView from "./views/SettingsView.jsx";
 import DictionaryView from "./views/DictionaryView.jsx";
 import InsightsView from "./views/InsightsView.jsx";
@@ -13,6 +14,7 @@ import SnippetsView from "./views/SnippetsView.jsx";
 import TransformsView from "./views/TransformsView.jsx";
 import StyleView from "./views/StyleView.jsx";
 import ScratchpadView from "./views/ScratchpadView.jsx";
+import ContextModesView from "./views/ContextModesView.jsx";
 import bulbulMark from "./assets/bulbul-mark.png";
 import OnboardingWizard from "./onboarding/OnboardingWizard.jsx";
 import TooltipProvider from "./components/TooltipProvider.jsx";
@@ -27,6 +29,12 @@ const ICONS = {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
       <path d="M9 22V12h6v10" />
+    </svg>
+  ),
+  history: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
     </svg>
   ),
   insights: (
@@ -81,10 +89,17 @@ const ICONS = {
       <circle cx="12" cy="12" r="3" />
     </svg>
   ),
+  modes: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z" />
+    </svg>
+  ),
 };
 
 const SECTIONS = [
   { id: "home", label: "Home", working: true },
+  { id: "history", label: "History", working: true },
+  { id: "modes", label: "Context Modes", working: true },
   { id: "insights", label: "Insights", working: true },
   { id: "dictionary", label: "Dictionary", working: true },
   { id: "snippets", label: "Snippets", working: true },
@@ -395,14 +410,16 @@ function App() {
 
   const mainView = (
     <>
-      {section === "home" && <HomeView displayName={config.display_name} />}
+      {section === "home" && <HomeView displayName={config.display_name} onNavigate={(sec) => setSection(sec)} />}
+      {section === "history" && <HistoryView />}
+      {section === "modes" && <ContextModesView />}
       {section === "dictionary" && <DictionaryView />}
       {section === "insights" && <InsightsView />}
       {section === "snippets" && <SnippetsView />}
       {section === "transforms" && <TransformsView />}
       {section === "style" && <StyleView config={config} updateConfig={updateConfig} />}
       {section === "scratchpad" && <ScratchpadView />}
-      {!["home", "dictionary", "insights", "snippets", "transforms", "style", "scratchpad"].includes(section) && <ComingSoon id={section} />}
+      {!["home", "history", "modes", "dictionary", "insights", "snippets", "transforms", "style", "scratchpad"].includes(section) && <ComingSoon id={section} />}
     </>
   );
 

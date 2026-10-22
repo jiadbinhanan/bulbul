@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Copyright (c) 2026 Romanch Roshan Singh
+// Copyright (c) 2026 Romanch Roshan Singh & Bulbul contributors
 
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import FeatureHero from "../components/FeatureHero.jsx";
 import featureDictionaryImg from "../assets/feature-dictionary.png";
+import "./VocabularyProfiles.css";
 
 const DICTIONARY_HERO_SAMPLES = [
   { trigger: "groq", expansion: "Groq" },
@@ -13,6 +14,298 @@ const DICTIONARY_HERO_SAMPLES = [
 ];
 
 export default function DictionaryView() {
+  const [tab, setTab] = useState("vocab"); // "vocab" or "subs"
+
+  return (
+    <div className="page dictionary-page">
+      <header className="page-header dictionary-header">
+        <div>
+          <h1>Dictionary & Vocabulary</h1>
+          <p className="muted small">
+            Manage custom terminology sets for Gemini 3.5 Transcribe, or set up post-transcription word replacements.
+          </p>
+        </div>
+      </header>
+
+      <div className="view-tabs-header">
+        <button
+          type="button"
+          className={`tab-btn ${tab === "vocab" ? "active-tab" : ""}`}
+          onClick={() => setTab("vocab")}
+        >
+          Vocabulary Profiles (Gemini 3.5)
+        </button>
+        <button
+          type="button"
+          className={`tab-btn ${tab === "subs" ? "active-tab" : ""}`}
+          onClick={() => setTab("subs")}
+        >
+          Word Substitutions
+        </button>
+      </div>
+
+      {tab === "vocab" ? <VocabularyProfilesTab /> : <WordSubstitutionsTab />}
+    </div>
+  );
+}
+
+function VocabularyProfilesTab() {
+  const [profiles, setProfiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [newProfileOpen, setNewProfileOpen] = useState(false);
+  const [newProfileName, setNewProfileName] = useState("");
+  const [newProfileDesc, setNewProfileDesc] = useState("");
+  const [termInputs, setTermInputs] = useState({});
+
+  useEffect(() => {
+    loadProfiles();
+  }, []);
+
+  async function loadProfiles() {
+    try {
+      setLoading(true);
+      const rows = await invoke("list_vocabulary_profiles");
+      setProfiles(rows);
+    } catch (e) {
+      console.error("Failed to load vocabulary profiles:", e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function toggleActive(p) {
+    try {
+      await invoke("toggle_vocabulary_profile", { id: p.id });
+      setProfiles((prev) =>
+        prev.map((item) =>
+          item.id === p.id ? { ...item, is_active: !item.is_active } : item
+        )
+      );
+    } catch (e) {
+      console.error("Failed to toggle profile:", e);
+    }
+  }
+
+  async function handleAddTerm(profileId) {
+    const term = (termInputs[profileId] || "").trim();
+    if (!term) return;
+
+    const prof = profiles.find((p) => p.id === profileId);
+    if (!prof) return;
+
+    if (prof.terms.includes(term)) {
+      setTermInputs((prev) => ({ ...prev, [profileId]: "" }));
+      return;
+    }
+
+    const updatedTerms = [...prof.terms, term];
+    try {
+      await invoke("save_vocabulary_profile", {
+        id: prof.id,
+        name: prof.name,
+        description: prof.description,
+        terms: updatedTerms,
+        isActive: prof.is_active,
+      });
+
+      setProfiles((prev) =>
+        prev.map((p) => (p.id === profileId ? { ...p, terms: updatedTerms } : p))
+      );
+      setTermInputs((prev) => ({ ...prev, [profileId]: "" }));
+    } catch (e) {
+      console.error("Failed to add term:", e);
+    }
+  }
+
+  async function handleRemoveTerm(profileId, termToRemove) {
+    const prof = profiles.find((p) => p.id === profileId);
+    if (!prof) return;
+
+    const updatedTerms = prof.terms.filter((t) => t !== termToRemove);
+    try {
+      await invoke("save_vocabulary_profile", {
+        id: prof.id,
+        name: prof.name,
+        description: prof.description,
+        terms: updatedTerms,
+        isActive: prof.is_active,
+      });
+
+      setProfiles((prev) =>
+        prev.map((p) => (p.id === profileId ? { ...p, terms: updatedTerms } : p))
+      );
+    } catch (e) {
+      console.error("Failed to remove term:", e);
+    }
+  }
+
+  async function handleCreateProfile(e) {
+    e.preventDefault();
+    if (!newProfileName.trim()) return;
+
+    try {
+      await invoke("save_vocabulary_profile", {
+        id: null,
+        name: newProfileName.trim(),
+        description: newProfileDesc.trim() || "Custom vocabulary set",
+        terms: [],
+        isActive: true,
+      });
+
+      setNewProfileOpen(false);
+      setNewProfileName("");
+      setNewProfileDesc("");
+      await loadProfiles();
+    } catch (err) {
+      console.error("Failed to create profile:", err);
+    }
+  }
+
+  async function handleDeleteProfile(id) {
+    if (!confirm("Are you sure you want to delete this vocabulary profile?")) return;
+    try {
+      await invoke("delete_vocabulary_profile", { id });
+      setProfiles((prev) => prev.filter((p) => p.id !== id));
+    } catch (e) {
+      console.error("Failed to delete profile:", e);
+    }
+  }
+
+  return (
+    <div className="vocab-profiles-container">
+      <div className="vocab-profiles-header">
+        <div>
+          <h2>Multi-Vocabulary Profiles</h2>
+          <span className="muted small">
+            Active sets are passed directly into Google Gemini 3.5 Transcribe (up to 1,000 terms) so names and dev terms stay in English.
+          </span>
+        </div>
+        <button
+          type="button"
+          className="btn-primary new-mode-btn"
+          onClick={() => setNewProfileOpen(true)}
+        >
+          + New Profile
+        </button>
+      </div>
+
+      {newProfileOpen && (
+        <form className="vocab-profile-card" onSubmit={handleCreateProfile} style={{ marginBottom: "18px" }}>
+          <h3 style={{ margin: "0 0 10px 0", fontSize: "14px" }}>Create Vocabulary Profile</h3>
+          <div style={{ display: "flex", gap: "10px", marginBottom: "10px" }}>
+            <input
+              type="text"
+              required
+              placeholder="Profile name (e.g. Cloud & DevOps)"
+              value={newProfileName}
+              onChange={(e) => setNewProfileName(e.target.value)}
+              className="add-term-input"
+            />
+            <input
+              type="text"
+              placeholder="Short description"
+              value={newProfileDesc}
+              onChange={(e) => setNewProfileDesc(e.target.value)}
+              className="add-term-input"
+            />
+          </div>
+          <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+            <button type="button" className="btn-action" onClick={() => setNewProfileOpen(false)}>
+              Cancel
+            </button>
+            <button type="submit" className="btn-primary" style={{ padding: "5px 14px" }}>
+              Create
+            </button>
+          </div>
+        </form>
+      )}
+
+      {loading ? (
+        <div className="empty-state"><p className="muted">Loading profiles...</p></div>
+      ) : (
+        <div className="vocab-profiles-grid">
+          {profiles.map((p) => (
+            <div key={p.id} className={`vocab-profile-card ${p.is_active ? "active-profile" : ""}`}>
+              <div className="vocab-card-top">
+                <div className="vocab-card-info">
+                  <h3>{p.name}</h3>
+                  <p>{p.description}</p>
+                </div>
+                <label className="vocab-toggle-label">
+                  <input
+                    type="checkbox"
+                    checked={p.is_active}
+                    onChange={() => toggleActive(p)}
+                  />
+                  <span>{p.is_active ? "Active" : "Inactive"}</span>
+                </label>
+              </div>
+
+              <div className="vocab-terms-box">
+                <div className="vocab-chips-wrap">
+                  {p.terms.map((term) => (
+                    <span key={term} className="vocab-chip">
+                      {term}
+                      <button
+                        type="button"
+                        className="chip-del"
+                        onClick={() => handleRemoveTerm(p.id, term)}
+                        title="Remove term"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ))}
+                  {p.terms.length === 0 && (
+                    <span className="muted small">No terms added yet.</span>
+                  )}
+                </div>
+
+                <div className="add-term-form">
+                  <input
+                    type="text"
+                    className="add-term-input"
+                    placeholder="Add term (e.g. Next.js, Supabase) and press Enter..."
+                    value={termInputs[p.id] || ""}
+                    onChange={(e) =>
+                      setTermInputs({ ...termInputs, [p.id]: e.target.value })
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleAddTerm(p.id);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn-add-chip"
+                    onClick={() => handleAddTerm(p.id)}
+                  >
+                    + Add
+                  </button>
+                </div>
+              </div>
+
+              <div className="vocab-card-bottom">
+                <span>{p.terms.length} term{p.terms.length === 1 ? "" : "s"}</span>
+                <button
+                  type="button"
+                  className="btn-delete-profile"
+                  onClick={() => handleDeleteProfile(p.id)}
+                >
+                  Delete Profile
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WordSubstitutionsTab() {
   const [entries, setEntries] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -47,7 +340,6 @@ export default function DictionaryView() {
   }
 
   async function dismissSuggestion(s) {
-    // Optimistic: drop it from the list immediately, then persist.
     setSuggestions((prev) =>
       prev.filter((p) => !(p.from_word === s.from_word && p.to_word === s.to_word)),
     );
@@ -94,21 +386,15 @@ export default function DictionaryView() {
   }, [entries, search]);
 
   return (
-    <div className="page dictionary-page">
-      <header className="page-header dictionary-header">
-        <div>
-          <h1>Dictionary</h1>
-          <p className="muted small">
-            Names, brands, jargon — Bulbul passes these to Whisper as a hint and substitutes them after transcription.
-          </p>
-        </div>
+    <>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: "12px" }}>
         <button
           className="primary"
           onClick={() => { setEditingId(null); setAdding(true); }}
         >
-          <PlusIcon /> Add new
+          <PlusIcon /> Add substitution
         </button>
-      </header>
+      </div>
 
       <FeatureHero
         dismissKey="bulbul.dictionary.hero.dismissed"
@@ -178,7 +464,7 @@ export default function DictionaryView() {
           <div className="empty-state"><p className="muted">Loading…</p></div>
         ) : filtered.length === 0 && !adding ? (
           <div className="empty-state">
-            <p>{search ? "No matches." : "No dictionary entries yet. Click \"Add new\" to start."}</p>
+            <p>{search ? "No matches." : "No dictionary entries yet. Click \"Add substitution\" to start."}</p>
           </div>
         ) : (
           filtered.map((e) => editingId === e.id ? (
@@ -198,7 +484,7 @@ export default function DictionaryView() {
           ))
         )}
       </div>
-    </div>
+    </>
   );
 }
 

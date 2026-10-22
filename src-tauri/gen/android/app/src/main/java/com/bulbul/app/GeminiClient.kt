@@ -97,7 +97,7 @@ object GeminiClient {
             }
 
             val audioTranscriptionConfig = JSONObject().apply {
-                put("languageCodes", JSONArray().put("bn-IN"))
+                put("languageCodes", JSONArray().put("bn-IN").put("en-IN"))
                 put("mode", "SMART")
                 if (vocabArray.length() > 0) {
                     put("customVocabulary", vocabArray)
@@ -151,11 +151,18 @@ object GeminiClient {
 
             val sb = java.lang.StringBuilder()
             for (i in 0 until parts.length()) {
-                val text = parts.getJSONObject(i).optString("text", "")
+                val partObj = parts.getJSONObject(i)
+                val text = if (partObj.has("audioTranscription")) {
+                    partObj.getJSONObject("audioTranscription").optString("text", "")
+                } else {
+                    partObj.optString("text", "")
+                }
                 sb.append(text)
             }
 
-            sb.toString().trim()
+            val result = sb.toString().trim()
+            Log.i(TAG, "Gemini transcription completed, text len=${result.length}: '$result'")
+            result
         } catch (t: Throwable) {
             Log.w(TAG, "Gemini transcribe failed", t)
             null
