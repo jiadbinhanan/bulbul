@@ -1,27 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 /* Copyright (c) 2026 Bulbul contributors */
 
-/* ── Royal Gold Theme Variables ──────────────────────────────── */
-:root {
-  --gold-primary: #d4af37;
-  --gold-secondary: #e6c66e;
-  --gold-surface: rgba(212, 175, 55, 0.08);
-  --gold-border: rgba(212, 175, 55, 0.32);
-  --gold-glow: rgba(212, 175, 55, 0.22);
-  --gold-gradient: linear-gradient(135deg, #dfb743 0%, #b89327 100%);
-  --gold-text-contrast: #0e0e0e;
-}
-
-:root[data-theme="light"] {
-  --gold-primary: #a87b18;
-  --gold-secondary: #8c640e;
-  --gold-surface: rgba(168, 123, 24, 0.09);
-  --gold-border: rgba(168, 123, 24, 0.38);
-  --gold-glow: rgba(168, 123, 24, 0.15);
-  --gold-gradient: linear-gradient(135deg, #c59828 0%, #a87b18 100%);
-  --gold-text-contrast: #ffffff;
-}
-
 /* ── Multi-Try Recording Card ────────────────────────────────── */
 .history-card-v2 {
   background: var(--surface-1);
@@ -41,9 +20,8 @@
 }
 
 .history-card-v2.pinned-card {
-  border-color: var(--gold-primary);
-  background: var(--gold-surface);
-  box-shadow: 0 0 16px var(--gold-glow);
+  border-color: rgba(234, 179, 8, 0.45);
+  background: rgba(234, 179, 8, 0.04);
 }
 
 .history-card-header {
@@ -105,9 +83,7 @@
 }
 
 .btn-icon-v2.pinned {
-  color: var(--gold-primary);
-  background: var(--gold-surface);
-  border-color: var(--gold-border);
+  color: #eab308;
   font-size: 15px;
 }
 
@@ -137,7 +113,7 @@
   border-color: rgba(220, 38, 38, 0.6);
 }
 
-/* ── Inline Audio Player ─────────────────────────────────────── */
+/* ── Inline Audio Player (Teal) ──────────────────────────────── */
 .inline-audio-player {
   display: flex;
   align-items: center;
@@ -150,8 +126,8 @@
 }
 
 .audio-play-btn {
-  background: var(--gold-gradient);
-  color: var(--gold-text-contrast);
+  background: #2dd4bf;
+  color: #0e0e0e;
   border: none;
   width: 32px;
   height: 32px;
@@ -161,19 +137,17 @@
   justify-content: center;
   cursor: pointer;
   font-size: 13px;
-  box-shadow: 0 2px 8px var(--gold-glow);
-  transition: transform 120ms ease, box-shadow 120ms ease;
+  transition: transform 120ms ease;
   flex-shrink: 0;
 }
 
 .audio-play-btn:hover {
   transform: scale(1.08);
-  box-shadow: 0 3px 12px var(--gold-glow);
 }
 
 .audio-track-slider {
   flex: 1;
-  accent-color: var(--gold-primary);
+  accent-color: #2dd4bf;
   height: 4px;
   cursor: pointer;
 }
@@ -224,7 +198,7 @@
 
 .phase-tab-btn.active-phase {
   background: var(--surface-1);
-  color: var(--gold-primary);
+  color: #2dd4bf;
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
@@ -253,11 +227,10 @@
 }
 
 .try-pill.active-try {
-  background: var(--gold-surface);
-  color: var(--gold-primary);
-  border-color: var(--gold-primary);
+  background: var(--fill-active);
+  color: var(--text);
+  border-color: #2dd4bf;
   font-weight: 600;
-  box-shadow: 0 0 6px var(--gold-glow);
 }
 
 /* ── Text Content Container ──────────────────────────────────── */
@@ -317,10 +290,16 @@
 }
 
 .badge-active-glow {
-  background: var(--gold-surface);
-  color: var(--gold-primary);
-  border: 1px solid var(--gold-border);
+  background: rgba(45, 212, 191, 0.12);
+  color: #2dd4bf;
+  border: 1px solid rgba(45, 212, 191, 0.3);
   font-weight: 600;
+}
+
+:root[data-theme="light"] .badge-active-glow {
+  background: rgba(20, 184, 166, 0.1);
+  color: #0f766e;
+  border-color: rgba(20, 184, 166, 0.3);
 }
 
 .badge-provider {
@@ -391,9 +370,9 @@
 }
 
 .btn-rerun:hover {
-  background: var(--gold-surface);
-  border-color: var(--gold-primary);
-  color: var(--gold-primary);
+  background: var(--fill-active);
+  border-color: #2dd4bf;
+  color: #2dd4bf;
 }
 
 /* ── Re-Run Modals ───────────────────────────────────────────── */
@@ -484,8 +463,8 @@
 .form-group select:focus,
 .form-group input:focus,
 .form-group textarea:focus {
-  border-color: var(--gold-primary);
-  box-shadow: 0 0 0 2px var(--gold-glow);
+  border-color: #2dd4bf;
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.2);
 }
 
 .modal-actions {
@@ -512,27 +491,26 @@
 }
 
 .btn-action.copied {
-  background: var(--gold-surface);
-  color: var(--gold-primary);
-  border-color: var(--gold-border);
+  background: rgba(45, 212, 191, 0.15);
+  color: #2dd4bf;
+  border-color: rgba(45, 212, 191, 0.4);
 }
 
 .btn-primary {
-  background: var(--gold-gradient);
-  border: 1px solid var(--gold-primary);
-  color: var(--gold-text-contrast);
+  background: #2dd4bf;
+  border: 1px solid #2dd4bf;
+  color: #0e0e0e;
   font-weight: 600;
   border-radius: 6px;
   padding: 6px 16px;
   font-size: 12px;
   cursor: pointer;
   transition: all 120ms ease;
-  box-shadow: 0 2px 8px var(--gold-glow);
 }
 
 .btn-primary:hover:not(:disabled) {
+  opacity: 0.92;
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px var(--gold-glow);
 }
 
 .btn-primary:disabled {

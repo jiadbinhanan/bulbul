@@ -1672,6 +1672,394 @@ fn complete_onboarding(app: tauri::AppHandle) -> Result<(), String> {
     save_config(app, cfg)
 }
 
+// ---------- V2 Multi-Phase Dictation & History (Mobile implementation) ----------
+
+const CONTEXT_MODES_FILE: &str = "context_modes.json";
+const VOCABULARY_PROFILES_FILE: &str = "vocabulary_profiles.json";
+
+fn default_context_modes() -> Vec<Value> {
+    vec![
+        json!({
+            "id": 1,
+            "name": "Direct Smart Dictation",
+            "icon": "⚡",
+            "description": "Standard fast speech-to-text with auto punctuation and disfluency cleanup.",
+            "system_prompt": "You are a direct dictation assistant. Fix spelling, capitalization, and punctuation. Do not add conversational filler.",
+            "phase2_provider": "gemini",
+            "phase2_model": "gemini-3.8-flash",
+            "thinking_level": "low",
+            "is_active": true
+        }),
+        json!({
+            "id": 2,
+            "name": "Coding Agent Prompt",
+            "icon": "💻",
+            "description": "Formats voice descriptions into structured instructions for AI coding assistants.",
+            "system_prompt": "You are a prompt engineer for AI coding assistants. Convert speech into concise, structured coding instructions.",
+            "phase2_provider": "gemini",
+            "phase2_model": "gemini-3.8-flash",
+            "thinking_level": "medium",
+            "is_active": false
+        }),
+        json!({
+            "id": 3,
+            "name": "Professional Email",
+            "icon": "✉️",
+            "description": "Transforms spoken thoughts into polite, professional email drafts.",
+            "system_prompt": "Format this dictated message into a clean, professional email with a polite tone.",
+            "phase2_provider": "gemini",
+            "phase2_model": "gemini-3.8-flash",
+            "thinking_level": "low",
+            "is_active": false
+        }),
+        json!({
+            "id": 4,
+            "name": "Natural Chat",
+            "icon": "💬",
+            "description": "Casual, fluent chat messages suitable for Slack, WhatsApp, or Discord.",
+            "system_prompt": "Clean up this spoken message into natural, fluent chat dialogue while keeping the tone casual.",
+            "phase2_provider": "gemini",
+            "phase2_model": "gemini-3.8-flash",
+            "thinking_level": "low",
+            "is_active": false
+        }),
+        json!({
+            "id": 5,
+            "name": "Direct Translation",
+            "icon": "🌐",
+            "description": "Directly translates Bengali speech to polished English or vice-versa.",
+            "system_prompt": "Translate the input text accurately between Bengali and English while preserving full meaning.",
+            "phase2_provider": "gemini",
+            "phase2_model": "gemini-3.8-flash",
+            "thinking_level": "low",
+            "is_active": false
+        }),
+    ]
+}
+
+fn default_vocabulary_profiles() -> Vec<Value> {
+    vec![
+        json!({
+            "id": 1,
+            "name": "Full-Stack Dev Stack",
+            "description": "Programming languages, frameworks, and tools",
+            "terms": ["Rust", "Tauri", "React", "TypeScript", "Vite", "TailwindCSS", "Node.js", "Docker", "GraphQL", "PostgreSQL", "SQLite", "GitHub Actions"],
+            "is_active": true
+        }),
+        json!({
+            "id": 2,
+            "name": "Business & Client",
+            "description": "Freelancing and client terminology",
+            "terms": ["Upwork", "Fiverr", "Invoice", "Deliverable", "Milestone", "Retainer", "Scope of Work", "SOW"],
+            "is_active": true
+        }),
+        json!({
+            "id": 3,
+            "name": "Banglish & Proper Nouns",
+            "description": "Common Bengali-English transliterated phrases and names",
+            "terms": ["Banglish", "Dhaka", "Chittagong", "Bikash", "Nagad", "Khub sundor", "Kemon acho"],
+            "is_active": true
+        }),
+    ]
+}
+
+#[tauri::command]
+fn list_recordings_v2(app: tauri::AppHandle, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<Value>, String> {
+    let limit = limit.unwrap_or(50) as usize;
+    let offset = offset.unwrap_or(0) as usize;
+    let rows = history_rows(&app);
+    let list: Vec<Value> = rows.iter()
+        .rev()
+        .skip(offset)
+        .take(limit)
+        .map(|r| {
+            let id_val = r["ts"].as_i64().unwrap_or_else(|| r["id"].as_i64().unwrap_or(0));
+            let id_str = id_val.to_string();
+            let created_at = r["ts"].as_i64().unwrap_or(0);
+            let duration_ms = r["duration_ms"].as_u64().unwrap_or(0);
+            let cleaned_text = r["cleaned_text"].as_str().unwrap_or("");
+            let is_pinned = r.get("is_pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mode = r.get("mode").and_then(|v| v.as_str()).unwrap_or("smart");
+
+            json!({
+                "recording": {
+                    "id": id_str,
+                    "audio_file_path": "",
+                    "duration_ms": duration_ms,
+                    "file_size_bytes": 0,
+                    "created_at": created_at,
+                    "is_pinned": is_pinned
+                },
+                "transcription_tries": [
+                    {
+                        "id": id_val,
+                        "recording_id": id_str,
+                        "provider": "gemini",
+                        "model": "gemini-3.5-flash",
+                        "mode": mode,
+                        "language_codes": ["bn", "en"],
+                        "vocabulary_profile_ids": [],
+                        "transcript_text": cleaned_text,
+                        "latency_ms": 0,
+                        "created_at": created_at
+                    }
+                ],
+                "post_process_tries": []
+            })
+        })
+        .collect();
+    Ok(list)
+}
+
+#[tauri::command]
+fn count_recordings_v2(app: tauri::AppHandle) -> Result<u64, String> {
+    Ok(history_rows(&app).len() as u64)
+}
+
+#[tauri::command]
+fn get_full_recording_v2(app: tauri::AppHandle, id: String) -> Result<Option<Value>, String> {
+    let target_id = id.parse::<i64>().unwrap_or(0);
+    let rows = history_rows(&app);
+    if let Some(r) = rows.iter().find(|r| r["ts"].as_i64() == Some(target_id) || r["id"].as_i64() == Some(target_id)) {
+        let id_val = r["ts"].as_i64().unwrap_or(target_id);
+        let id_str = id_val.to_string();
+        let created_at = r["ts"].as_i64().unwrap_or(0);
+        let duration_ms = r["duration_ms"].as_u64().unwrap_or(0);
+        let cleaned_text = r["cleaned_text"].as_str().unwrap_or("");
+        let is_pinned = r.get("is_pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mode = r.get("mode").and_then(|v| v.as_str()).unwrap_or("smart");
+        return Ok(Some(json!({
+            "recording": {
+                "id": id_str,
+                "audio_file_path": "",
+                "duration_ms": duration_ms,
+                "file_size_bytes": 0,
+                "created_at": created_at,
+                "is_pinned": is_pinned
+            },
+            "transcription_tries": [
+                {
+                    "id": id_val,
+                    "recording_id": id_str,
+                    "provider": "gemini",
+                    "model": "gemini-3.5-flash",
+                    "mode": mode,
+                    "language_codes": ["bn", "en"],
+                    "vocabulary_profile_ids": [],
+                    "transcript_text": cleaned_text,
+                    "latency_ms": 0,
+                    "created_at": created_at
+                }
+            ],
+            "post_process_tries": []
+        })));
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+fn delete_recording_v2(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let id_num = id.parse::<i64>().unwrap_or(0);
+    delete_dictation(app, id_num)
+}
+
+#[tauri::command]
+fn toggle_recording_pinned(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+    let id_num = id.parse::<i64>().unwrap_or(0);
+    let mut rows = history_rows(&app);
+    let mut next = false;
+    for r in rows.iter_mut() {
+        if r["ts"].as_i64() == Some(id_num) || r["id"].as_i64() == Some(id_num) {
+            let cur = r.get("is_pinned").and_then(|v| v.as_bool()).unwrap_or(false);
+            next = !cur;
+            r["is_pinned"] = json!(next);
+            break;
+        }
+    }
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let mut text = rows.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("\n");
+    if !rows.is_empty() {
+        text.push('\n');
+    }
+    std::fs::write(dir.join(HISTORY_FILE), text).map_err(|e| e.to_string())?;
+    Ok(next)
+}
+
+#[tauri::command]
+fn get_recording_audio_bytes(_recording_id: String) -> Result<String, String> {
+    Ok("".to_string())
+}
+
+#[tauri::command]
+fn list_context_modes(app: tauri::AppHandle) -> Result<Vec<Value>, String> {
+    let mut modes = read_json_array(&app, CONTEXT_MODES_FILE);
+    if modes.is_empty() {
+        modes = default_context_modes();
+        let _ = write_json_array(&app, CONTEXT_MODES_FILE, &modes);
+    }
+    Ok(modes)
+}
+
+#[tauri::command]
+fn get_context_mode(app: tauri::AppHandle, id: i64) -> Result<Option<Value>, String> {
+    let modes = list_context_modes(app)?;
+    Ok(modes.into_iter().find(|m| m["id"].as_i64() == Some(id)))
+}
+
+#[tauri::command]
+fn save_context_mode(
+    app: tauri::AppHandle,
+    id: Option<i64>,
+    name: String,
+    icon: String,
+    description: String,
+    system_prompt: String,
+    phase2_provider: String,
+    phase2_model: String,
+    thinking_level: Option<String>,
+    is_active: bool,
+) -> Result<i64, String> {
+    let mut modes = list_context_modes(app.clone())?;
+    let target_id = id.unwrap_or_else(|| next_id(&modes));
+    if is_active {
+        for m in modes.iter_mut() {
+            m["is_active"] = json!(false);
+        }
+    }
+    if let Some(pos) = modes.iter().position(|m| m["id"].as_i64() == Some(target_id)) {
+        modes[pos] = json!({
+            "id": target_id,
+            "name": name,
+            "icon": icon,
+            "description": description,
+            "system_prompt": system_prompt,
+            "phase2_provider": phase2_provider,
+            "phase2_model": phase2_model,
+            "thinking_level": thinking_level,
+            "is_active": is_active,
+        });
+    } else {
+        modes.push(json!({
+            "id": target_id,
+            "name": name,
+            "icon": icon,
+            "description": description,
+            "system_prompt": system_prompt,
+            "phase2_provider": phase2_provider,
+            "phase2_model": phase2_model,
+            "thinking_level": thinking_level,
+            "is_active": is_active,
+        }));
+    }
+    write_json_array(&app, CONTEXT_MODES_FILE, &modes)?;
+    Ok(target_id)
+}
+
+#[tauri::command]
+fn delete_context_mode(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let mut modes = list_context_modes(app.clone())?;
+    modes.retain(|m| m["id"].as_i64() != Some(id));
+    write_json_array(&app, CONTEXT_MODES_FILE, &modes)
+}
+
+#[tauri::command]
+fn set_active_context_mode(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let mut modes = list_context_modes(app.clone())?;
+    for m in modes.iter_mut() {
+        m["is_active"] = json!(m["id"].as_i64() == Some(id));
+    }
+    write_json_array(&app, CONTEXT_MODES_FILE, &modes)
+}
+
+#[tauri::command]
+fn list_vocabulary_profiles(app: tauri::AppHandle) -> Result<Vec<Value>, String> {
+    let mut profiles = read_json_array(&app, VOCABULARY_PROFILES_FILE);
+    if profiles.is_empty() {
+        profiles = default_vocabulary_profiles();
+        let _ = write_json_array(&app, VOCABULARY_PROFILES_FILE, &profiles);
+    }
+    Ok(profiles)
+}
+
+#[tauri::command]
+fn save_vocabulary_profile(
+    app: tauri::AppHandle,
+    id: Option<i64>,
+    name: String,
+    description: String,
+    terms: Vec<String>,
+    is_active: bool,
+) -> Result<i64, String> {
+    let mut profiles = list_vocabulary_profiles(app.clone())?;
+    let target_id = id.unwrap_or_else(|| next_id(&profiles));
+    if let Some(pos) = profiles.iter().position(|p| p["id"].as_i64() == Some(target_id)) {
+        profiles[pos] = json!({
+            "id": target_id,
+            "name": name,
+            "description": description,
+            "terms": terms,
+            "is_active": is_active,
+        });
+    } else {
+        profiles.push(json!({
+            "id": target_id,
+            "name": name,
+            "description": description,
+            "terms": terms,
+            "is_active": is_active,
+        }));
+    }
+    write_json_array(&app, VOCABULARY_PROFILES_FILE, &profiles)?;
+    Ok(target_id)
+}
+
+#[tauri::command]
+fn toggle_vocabulary_profile(app: tauri::AppHandle, id: i64) -> Result<bool, String> {
+    let mut profiles = list_vocabulary_profiles(app.clone())?;
+    let mut next = false;
+    for p in profiles.iter_mut() {
+        if p["id"].as_i64() == Some(id) {
+            let cur = p.get("is_active").and_then(|v| v.as_bool()).unwrap_or(false);
+            next = !cur;
+            p["is_active"] = json!(next);
+            break;
+        }
+    }
+    write_json_array(&app, VOCABULARY_PROFILES_FILE, &profiles)?;
+    Ok(next)
+}
+
+#[tauri::command]
+fn delete_vocabulary_profile(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let mut profiles = list_vocabulary_profiles(app.clone())?;
+    profiles.retain(|p| p["id"].as_i64() != Some(id));
+    write_json_array(&app, VOCABULARY_PROFILES_FILE, &profiles)
+}
+
+#[tauri::command]
+fn rerun_transcription(
+    _recording_id: String,
+    _provider: String,
+    _model: String,
+    _mode: String,
+    _custom_vocabulary: Vec<String>,
+) -> Result<Value, String> {
+    Err("Re-transcription is only available on desktop recordings.".to_string())
+}
+
+#[tauri::command]
+fn rerun_post_process(
+    _recording_id: String,
+    _transcription_try_id: i64,
+    _mode_name: String,
+    _provider: String,
+    _model: String,
+    _thinking_level: Option<String>,
+    _prompt: String,
+) -> Result<Value, String> {
+    Err("Re-post-processing is only available on desktop recordings.".to_string())
+}
+
 // ---------- Entry point ----------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1740,6 +2128,24 @@ pub fn run() {
             set_overlay_height,
             open_scratchpad,
             complete_onboarding,
+            // V2 Multi-Phase Dictation & History
+            list_recordings_v2,
+            count_recordings_v2,
+            get_full_recording_v2,
+            delete_recording_v2,
+            toggle_recording_pinned,
+            get_recording_audio_bytes,
+            list_context_modes,
+            get_context_mode,
+            save_context_mode,
+            delete_context_mode,
+            set_active_context_mode,
+            list_vocabulary_profiles,
+            save_vocabulary_profile,
+            toggle_vocabulary_profile,
+            delete_vocabulary_profile,
+            rerun_transcription,
+            rerun_post_process,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Bulbul on mobile");

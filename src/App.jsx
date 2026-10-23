@@ -430,7 +430,7 @@ function App() {
   if (IS_ANDROID) {
     // Bottom tab bar, in this explicit order (Scratchpad sits where Dictionary
     // used to be); everything else lives in the "More" hamburger sheet.
-    const PRIMARY_IDS = ["home", "insights", "scratchpad", "transforms"];
+    const PRIMARY_IDS = ["home", "history", "scratchpad", "transforms"];
     const primary = PRIMARY_IDS.map((id) => SECTIONS.find((s) => s.id === id)).filter(Boolean);
     const secondary = SECTIONS.filter((s) => !PRIMARY_IDS.includes(s.id));
     return (

@@ -8,7 +8,7 @@
   margin: 0 auto;
 }
 
-/* ── Royal History Toolbar ───────────────────────────────────── */
+/* ── History Toolbar ─────────────────────────────────────────── */
 .history-toolbar {
   display: flex;
   flex-direction: column;
@@ -38,12 +38,17 @@
   align-items: center;
 }
 
+/* Royal Gold Accent on Search */
 .history-search-icon {
   position: absolute;
   left: 12px;
-  color: var(--gold-primary);
+  color: #d4af37;
   pointer-events: none;
   transition: color 150ms ease;
+}
+
+:root[data-theme="light"] .history-search-icon {
+  color: #a87b18;
 }
 
 .history-search-input {
@@ -64,8 +69,13 @@
 }
 
 .history-search-input:focus {
-  border-color: var(--gold-primary);
-  box-shadow: 0 0 0 2px var(--gold-glow);
+  border-color: #d4af37;
+  box-shadow: 0 0 0 2px rgba(212, 175, 55, 0.25);
+}
+
+:root[data-theme="light"] .history-search-input:focus {
+  border-color: #a87b18;
+  box-shadow: 0 0 0 2px rgba(168, 123, 24, 0.2);
 }
 
 /* ── Filter Row ──────────────────────────────────────────────── */
@@ -102,12 +112,20 @@
   color: var(--text);
 }
 
+/* Royal Gold for active tab (formerly purple/indigo #6366f1) */
 .history-filter-tab.active {
-  background: var(--gold-gradient);
-  border-color: var(--gold-primary);
-  color: var(--gold-text-contrast);
+  background: linear-gradient(135deg, #dfb743 0%, #b89327 100%);
+  border-color: #d4af37;
+  color: #0e0e0e;
   font-weight: 600;
-  box-shadow: 0 2px 8px var(--gold-glow);
+  box-shadow: 0 2px 8px rgba(212, 175, 55, 0.25);
+}
+
+:root[data-theme="light"] .history-filter-tab.active {
+  background: linear-gradient(135deg, #c59828 0%, #a87b18 100%);
+  border-color: #a87b18;
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(168, 123, 24, 0.2);
 }
 
 .history-controls-right {
@@ -131,7 +149,12 @@
 
 .history-mode-select:focus,
 .history-page-size-select:focus {
-  border-color: var(--gold-primary);
+  border-color: #d4af37;
+}
+
+:root[data-theme="light"] .history-mode-select:focus,
+:root[data-theme="light"] .history-page-size-select:focus {
+  border-color: #a87b18;
 }
 
 /* ── Pagination Bar ──────────────────────────────────────────── */
@@ -162,9 +185,8 @@
 }
 
 .pagination-btn:hover:not(:disabled) {
-  background: var(--gold-surface);
-  border-color: var(--gold-primary);
-  color: var(--gold-primary);
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
 }
 
 .pagination-btn:disabled {

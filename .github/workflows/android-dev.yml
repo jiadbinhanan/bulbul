@@ -25,8 +25,9 @@ name: Android dev build
 #     rustup targets and dropping the `--target aarch64` flag.
 
 on:
-  # Manual only — run from the Actions tab (or `gh workflow run`) when
-  # a dev build is explicitly wanted. No longer builds on every push.
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 # One build per branch: a newer push cancels an in-flight run so two
@@ -46,12 +47,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version: '22'
+          package-manager-cache: false
 
       - name: Setup JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
