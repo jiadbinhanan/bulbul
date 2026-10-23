@@ -305,10 +305,15 @@ pub async fn transcribe(
         // Rebuilt per attempt: a multipart Form is consumed on send, so the
         // wav bytes are cloned for each model tried.
         let make = || {
+            let (file_name, mime_type) = if wav_bytes.starts_with(b"OggS") {
+                ("recording.ogg", "audio/ogg")
+            } else {
+                ("recording.wav", "audio/wav")
+            };
             let part = multipart::Part::bytes(wav_bytes.clone())
-                .file_name("recording.wav")
-                .mime_str("audio/wav")
-                .expect("audio/wav is a valid MIME type");
+                .file_name(file_name)
+                .mime_str(mime_type)
+                .expect("valid audio MIME type");
             let mut form = multipart::Form::new()
                 .part("file", part)
                 .text("model", model.clone())

@@ -90,6 +90,7 @@ class BulbulForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "service onCreate")
+        BulbulBridge.ensureInitialized(this)
         createNotificationChannel()
         startInForeground()
         recorder = AudioRecorder(this)
@@ -124,9 +125,9 @@ class BulbulForegroundService : Service() {
     private fun onBubbleTap() {
         val r = recorder ?: return
         if (r.isRecording()) {
-            val wav = r.stop()
+            val pcm = r.stopRawPcm()
             bubbleView?.setRecording(false)
-            if (wav != null) processCapturedAudio(wav)
+            if (pcm != null) processCapturedAudio(pcm)
         } else {
             val ok = r.start()
             if (ok) {
@@ -134,9 +135,6 @@ class BulbulForegroundService : Service() {
                 bubbleView?.setRecording(true)
                 restoreNormalNotification()
             } else {
-                // Mic revoked mid-use: the recorder can't start. Surface it
-                // via the tappable recovery notification instead of failing
-                // silently (the bubble would otherwise just do nothing).
                 Log.w(TAG, "recorder failed to start — RECORD_AUDIO probably not granted")
                 showPermissionRecovery("Microphone is off")
             }
@@ -163,98 +161,53 @@ class BulbulForegroundService : Service() {
     private fun onBubbleHoldReleased() {
         val r = recorder ?: return
         if (r.isRecording()) {
-            val wav = r.stop()
+            val pcm = r.stopRawPcm()
             bubbleView?.setRecording(false)
-            if (wav != null) processCapturedAudio(wav)
+            if (pcm != null) processCapturedAudio(pcm)
         }
     }
 
-    /// Off-main-thread: ship the WAV to Groq Whisper, then inject the
-    /// transcript into the focused field via the AccessibilityService.
-    /// On any failure, write the WAV to disk so the user's words
-    /// survive — they'll lose the convenience of auto-paste but not
-    /// the audio itself.
-    private fun processCapturedAudio(wav: ByteArray) {
+    /// Off-main-thread: pass raw PCM to the unified Rust core via JNI
+    /// (Ogg Opus encode, SQLite storage, Gemini/Groq STT, Phase 2 post-processing, WebDAV auto-sync),
+    /// then inject the result into the focused field.
+    private fun processCapturedAudio(pcm: ByteArray) {
         val appPkg = pendingAppPackage
         thread(name = "BulbulTranscribe", isDaemon = true) {
             val lang = BulbulConfig.language(this)
-            val isBengaliGemini = lang == "bn-IN" || lang == "bn-IN-tech"
-            val isCoding = lang == "bn-IN-tech"
-            val apiKey = getApiKey()
-            val geminiKey = getGeminiApiKey()
+            val contextModeId = BulbulConfig.activeContextModeId(this)
 
-            val transcript = if (isBengaliGemini) {
-                if (geminiKey.isNotBlank()) {
-                    val vocab = BulbulConfig.dictionaryWords(this)
-                    GeminiClient.transcribe(geminiKey, wav, vocab, isCoding)
-                } else {
-                    Log.w(TAG, "no Gemini API key set for Bengali dictation")
-                    null
-                }
-            } else if (apiKey.isNotBlank()) {
-                GroqClient.transcribe(apiKey, wav)
-            } else null
+            val finalText = try {
+                BulbulBridge.processVoiceAudio(pcm, AudioRecorder.SAMPLE_RATE_HZ, lang, contextModeId)
+            } catch (t: Throwable) {
+                Log.e(TAG, "BulbulBridge.processVoiceAudio failed", t)
+                ""
+            }
 
-            if (transcript != null) {
-                if (transcript.isBlank()) {
-                    Log.i(TAG, "transcript was blank — no audible speech detected")
-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        android.widget.Toast.makeText(
-                            this,
-                            "Bulbul: কোনো কথা শোনা যায়নি (মাইক্রোফোন চেক করুন)",
-                            android.widget.Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                    return@thread
-                }
+            if (finalText.isNotBlank()) {
                 val friendly = friendlyAppName(appPkg)
                 val mode = BulbulConfig.mode(this)
-
-                // AI cleanup: Gemini 3.5 Transcribe in SMART mode formats, punctuates,
-                // and strips disfluencies in a single pass. We bypass Cleanup.clean()
-                // for Bengali dictations while keeping it for standard Groq languages.
-                val cleaned = if (isBengaliGemini) {
-                    transcript
-                } else {
-                    Cleanup.clean(this, apiKey, transcript, mode, appPkg, friendly)
-                }
-
-                // Apply the user's dictionary (whole-word substitutions) then
-                // expand snippets — same order as desktop — before injecting.
-                val (corrected, dictionaryFixes) = BulbulConfig.applyDictionary(this, cleaned)
-                val finalText = BulbulConfig.applySnippets(this, corrected)
-
                 val injected = TextInjector.inject(finalText)
-                // Total fixes = raw-vs-final word diff, same meaning as
-                // desktop's count_fixes (db.rs) — folds in the Cleanup LLM's
-                // edits together with dictionary substitutions. Previously
-                // this stored only dictionaryFixes, so Insights' "Fixes made
-                // by Bulbul" always showed 0 AI fixes even though Cleanup
-                // genuinely runs on Android now (mobile.rs::get_insights_usage
-                // derives ai_fixes back out as total - dictionary_fixes).
-                val totalFixes = countFixes(transcript, finalText)
-                Log.i(TAG, "transcript len=${finalText.length} mode=$mode fixes=$totalFixes (dictionary=$dictionaryFixes) app=$friendly injected=$injected")
-                val durationMs = wavDurationMs(wav)
-                // Store the pre-cleanup transcript + actual mode so Insights and
-                // style-memory personalization have real raw→cleaned pairs.
-                recordHistory(transcript, finalText, mode, durationMs, totalFixes, friendly)
+                Log.i(TAG, "transcript len=${finalText.length} mode=$mode app=$friendly injected=$injected")
 
-                // Opt-in telemetry: coarse buckets only — no text, no app name.
+                val durationMs = (pcm.size.toLong() * 1000L) / (AudioRecorder.SAMPLE_RATE_HZ * 2L)
                 val words = finalText.trim().split(Regex("\\s+")).count { it.isNotEmpty() }
                 Telemetry.track(this, "dictation_completed", org.json.JSONObject().apply {
                     put("mode", mode)
-                    put("language", BulbulConfig.language(this@BulbulForegroundService))
+                    put("language", lang)
                     put("duration_bucket", Telemetry.durationBucket(durationMs))
                     put("word_count_bucket", Telemetry.wordCountBucket(words))
-                    put("had_fixes", totalFixes > 0)
                 })
-                // Couldn't type it in (focus gone, A11y unbound) — put
-                // the words on the clipboard so they're one long-press
-                // away instead of silently lost.
+
                 if (!injected) clipboardFallback(finalText)
             } else {
-                Log.w(TAG, "transcription failed; saving WAV instead")
-                writeRecording(wav)
+                Log.i(TAG, "transcript was blank — no speech detected or transcription failed")
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    android.widget.Toast.makeText(
+                        this,
+                        "Bulbul: কোনো কথা শোনা যায়নি (বা API Key চেক করুন)",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         }
     }

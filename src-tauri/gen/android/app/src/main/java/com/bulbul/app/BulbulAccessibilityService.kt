@@ -247,7 +247,8 @@ class BulbulAccessibilityService : AccessibilityService() {
     /// until the wizard's own "Done" screen calls complete_onboarding.
     private fun shouldShowBubble(): Boolean {
         return isImeVisible() && !passwordFocused && !BulbulConfig.isSnoozed(this) &&
-            BulbulConfig.onboardingCompleted(this)
+            BulbulConfig.onboardingCompleted(this) &&
+            BulbulConfig.floatingBubbleEnabled(this)
     }
 
     /// Called by the foreground service when the user snoozes: forget that

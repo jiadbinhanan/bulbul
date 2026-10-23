@@ -48,9 +48,8 @@ mod linux_evdev;
 mod linux_mouse;
 
 /// Minimum gap between two fires of the same hotkey. Guards against
-/// auto-repeat and spurious event bursts. Used by mod.rs's per-shortcut
-/// handlers; the native release-poller has its own cadence constants.
-pub const FIRE_COOLDOWN_MS: u128 = 700;
+/// auto-repeat and spurious event bursts while allowing responsive tap-to-stop.
+pub const FIRE_COOLDOWN_MS: u128 = 200;
 
 #[derive(Clone, Debug)]
 pub enum HotkeyEvent {
@@ -63,108 +62,107 @@ pub enum HotkeyEvent {
 
 // ─── "Tap to talk" ──────────────────────────────────────────────────────
 //
-// When on, the dictation/polish hotkeys toggle instead of requiring a
-// hold: one tap starts, the next tap stops. A plain global rather than
-// something threaded through HotkeySet/re_register, because the Windows
-// LL keyboard hook (keyboard_hook.rs) is installed ONCE at boot and isn't
-// re-created per hotkey registration the way the other physical-key
-// producers are — a global is the one thing every producer can reach
-// without re-plumbing each of their call sites individually.
-//
-// `route_physical_event` is the single choke point every PHYSICAL
-// press/release producer sends through instead of hitting `tx` directly:
-// the Windows LL keyboard hook (modifier-only chords like the default
-// Ctrl+Win), the global-shortcut handler + native release poller (regular
-// combos, e.g. Shift+Alt+P), and Linux evdev (direct /dev/input reading,
-// the default Linux path once the user has input-device access).
-//
-// Deliberately NOT wired into two other producers:
-//   - `cli_toggle_dictation` (desktop.rs) — the Linux CLI/signal escape
-//     hatch for GNOME Wayland users whose compositor can't register the
-//     hotkey at all. It already has its own complete, independent toggle
-//     state and sends straight to AppState.hotkey_tx without going
-//     through hotkey::re_register or this function at all, so it's
-//     structurally unaffected by this setting either way — which is
-//     exactly what keeps it working regardless of whether "Tap to talk"
-//     is on.
-//   - `linux_portal.rs` (the Wayland GlobalShortcuts portal, used when
-//     evdev access isn't available yet) — it already implements its own
-//     toggle-tolerance as a workaround for a GNOME bug where a held
-//     shortcut sometimes never emits a release signal at all: a second
-//     Activated while already active is treated as the missing release
-//     and turned into a synthesized `DictationReleased`. Passing that
-//     synthesized release back through this translation would swallow it
-//     (tap mode treats a raw release as "ignore, wait for the next tap"),
-//     silently breaking the exact GNOME workaround it depends on. Until
-//     that's unified deliberately, "Tap to talk" simply has no effect on
-//     the portal path — a real hold still behaves as a real hold there.
+// Smart Hybrid Hold & Tap:
+//   - If the user HOLDS the hotkey (> 350ms) and releases: it immediately stops
+//     recording and proceeds to processing (natural hold-to-talk).
+//   - If the user TAPS the hotkey quickly (< 350ms) when Tap-to-Talk is on:
+//     it latches into hands-free recording mode until they tap again.
+//   - When Tap-to-Talk is off: pure hold-to-talk is enforced.
 static TAP_TO_TALK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static DICTATION_TAP_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static POLISH_TAP_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+static DICTATION_PRESS_START: Mutex<Option<Instant>> = Mutex::new(None);
+static POLISH_PRESS_START: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Threshold distinguishing an intentional hold (> 350ms) from a quick tap (< 350ms).
+const HOLD_THRESHOLD_MS: u128 = 350;
+
 /// Updates the shared "Tap to talk" flag every physical producer reads.
-/// Call at boot (from the loaded config) and whenever Settings saves a
-/// change to it. Resets both per-hotkey toggle states so flipping the
-/// setting can never leave a stale "already active" flag around that
-/// would silently eat the next real tap.
 pub fn set_tap_to_talk_enabled(on: bool) {
     use std::sync::atomic::Ordering;
     TAP_TO_TALK.store(on, Ordering::SeqCst);
     DICTATION_TAP_ACTIVE.store(false, Ordering::SeqCst);
     POLISH_TAP_ACTIVE.store(false, Ordering::SeqCst);
+    *DICTATION_PRESS_START.lock() = None;
+    *POLISH_PRESS_START.lock() = None;
 }
 
-/// Whether "Tap to talk" is currently on. Used by keyboard_hook.rs's
-/// modifier-chord engagement check to decide whether it can trust a fast
-/// tap immediately or should keep cross-checking GetAsyncKeyState first —
-/// see the comment at that call site for why the two modes need
-/// different answers to the same question.
+/// Whether "Tap to talk" is currently on.
 pub fn tap_to_talk_enabled() -> bool {
     TAP_TO_TALK.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-/// Routes one raw physical press/release through "Tap to talk"
-/// translation when it's on, before forwarding to `tx`: a tap starts
-/// (forwards Pressed), a raw release is swallowed, and the next tap stops
-/// (forwards Released instead of Pressed). Passed straight through
-/// unchanged when the setting is off, and for event kinds it doesn't
-/// apply to (`TransformTriggered` — slots are already tap-to-trigger).
+/// Routes raw physical press/release events through smart hybrid hold & tap logic.
 pub fn route_physical_event(evt: HotkeyEvent, tx: &Sender<HotkeyEvent>) {
     use std::sync::atomic::Ordering;
-    if !TAP_TO_TALK.load(Ordering::SeqCst) {
-        let _ = tx.send(evt);
-        return;
-    }
+    let tap_mode = TAP_TO_TALK.load(Ordering::SeqCst);
+
     match evt {
         HotkeyEvent::DictationPressed => {
-            toggle_forward(&DICTATION_TAP_ACTIVE, HotkeyEvent::DictationPressed, HotkeyEvent::DictationReleased, tx)
+            let is_active = DICTATION_TAP_ACTIVE.load(Ordering::SeqCst);
+            if !is_active {
+                // First press: mark active, record timestamp, start dictation
+                DICTATION_TAP_ACTIVE.store(true, Ordering::SeqCst);
+                *DICTATION_PRESS_START.lock() = Some(Instant::now());
+                let _ = tx.send(HotkeyEvent::DictationPressed);
+            } else {
+                // Second press while already active: this is a STOP tap!
+                DICTATION_TAP_ACTIVE.store(false, Ordering::SeqCst);
+                *DICTATION_PRESS_START.lock() = None;
+                let _ = tx.send(HotkeyEvent::DictationReleased);
+            }
         }
-        HotkeyEvent::DictationReleased => {}
-        HotkeyEvent::PolishDictationPressed => toggle_forward(
-            &POLISH_TAP_ACTIVE,
-            HotkeyEvent::PolishDictationPressed,
-            HotkeyEvent::PolishDictationReleased,
-            tx,
-        ),
-        HotkeyEvent::PolishDictationReleased => {}
+        HotkeyEvent::DictationReleased => {
+            let press_time = DICTATION_PRESS_START.lock().take();
+            let is_active = DICTATION_TAP_ACTIVE.load(Ordering::SeqCst);
+            if !is_active {
+                return;
+            }
+
+            let hold_ms = press_time.map_or(0, |t| t.elapsed().as_millis());
+            if hold_ms >= HOLD_THRESHOLD_MS {
+                // User held down the key for >350ms while speaking, then released.
+                // This is an intentional hold-to-talk release! Always stop and process!
+                DICTATION_TAP_ACTIVE.store(false, Ordering::SeqCst);
+                let _ = tx.send(HotkeyEvent::DictationReleased);
+            } else if !tap_mode {
+                // In pure hold mode without tap-to-talk, release immediately even if quick tap
+                DICTATION_TAP_ACTIVE.store(false, Ordering::SeqCst);
+                let _ = tx.send(HotkeyEvent::DictationReleased);
+            } else {
+                // In tap-to-talk mode, a quick tap (<350ms) keeps recording hands-free
+                // until the user taps again to stop.
+            }
+        }
+        HotkeyEvent::PolishDictationPressed => {
+            let is_active = POLISH_TAP_ACTIVE.load(Ordering::SeqCst);
+            if !is_active {
+                POLISH_TAP_ACTIVE.store(true, Ordering::SeqCst);
+                *POLISH_PRESS_START.lock() = Some(Instant::now());
+                let _ = tx.send(HotkeyEvent::PolishDictationPressed);
+            } else {
+                POLISH_TAP_ACTIVE.store(false, Ordering::SeqCst);
+                *POLISH_PRESS_START.lock() = None;
+                let _ = tx.send(HotkeyEvent::PolishDictationReleased);
+            }
+        }
+        HotkeyEvent::PolishDictationReleased => {
+            let press_time = POLISH_PRESS_START.lock().take();
+            let is_active = POLISH_TAP_ACTIVE.load(Ordering::SeqCst);
+            if !is_active {
+                return;
+            }
+
+            let hold_ms = press_time.map_or(0, |t| t.elapsed().as_millis());
+            if hold_ms >= HOLD_THRESHOLD_MS || !tap_mode {
+                POLISH_TAP_ACTIVE.store(false, Ordering::SeqCst);
+                let _ = tx.send(HotkeyEvent::PolishDictationReleased);
+            }
+        }
         other => {
             let _ = tx.send(other);
         }
-    }
-}
-
-fn toggle_forward(
-    active: &std::sync::atomic::AtomicBool,
-    pressed: HotkeyEvent,
-    released: HotkeyEvent,
-    tx: &Sender<HotkeyEvent>,
-) {
-    use std::sync::atomic::Ordering;
-    if !active.swap(true, Ordering::SeqCst) {
-        let _ = tx.send(pressed);
-    } else {
-        active.store(false, Ordering::SeqCst);
-        let _ = tx.send(released);
     }
 }
 
@@ -253,6 +251,21 @@ pub fn set_mouse_button(btn: MouseButton) {
 pub fn should_handle_mouse_click(btn: MouseButton) -> bool {
     use std::sync::atomic::Ordering;
     MOUSE_MODE.load(Ordering::SeqCst) && MouseButton::from_u8(MOUSE_BUTTON.load(Ordering::SeqCst)) == btn
+}
+
+fn toggle_forward(
+    active: &std::sync::atomic::AtomicBool,
+    pressed: HotkeyEvent,
+    released: HotkeyEvent,
+    tx: &Sender<HotkeyEvent>,
+) {
+    use std::sync::atomic::Ordering;
+    if !active.swap(true, Ordering::SeqCst) {
+        let _ = tx.send(pressed);
+    } else {
+        active.store(false, Ordering::SeqCst);
+        let _ = tx.send(released);
+    }
 }
 
 /// Toggles dictation on a mouse-mode click: the first click starts

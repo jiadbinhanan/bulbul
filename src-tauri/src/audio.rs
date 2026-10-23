@@ -311,13 +311,25 @@ impl Recorder {
         let mut buf = Cursor::new(Vec::<u8>::new());
         {
             let mut writer = hound::WavWriter::new(&mut buf, spec).context("creating WAV writer")?;
-            for s in final_samples {
-                writer.write_sample(s)?;
+            for s in &final_samples {
+                writer.write_sample(*s)?;
             }
             writer.finalize()?;
         }
+
+        let opus = if out_rate == 16000 {
+            crate::opus_encoder::encode_pcm_to_ogg_opus(&final_samples)
+                .unwrap_or_else(|e| {
+                    tracing::error!("Opus encoding failed: {e:#}");
+                    Vec::new()
+                })
+        } else {
+            Vec::new()
+        };
+
         Ok(RecordingResult {
             wav: buf.into_inner(),
+            opus,
             peak_dbfs,
             rms_dbfs,
             max_window_rms_dbfs,
@@ -337,6 +349,7 @@ impl Recorder {
 
 pub struct RecordingResult {
     pub wav: Vec<u8>,
+    pub opus: Vec<u8>,
     pub peak_dbfs: f32,
     pub rms_dbfs: f32,
     /// RMS of the loudest 30 ms window in the clip. This is what the

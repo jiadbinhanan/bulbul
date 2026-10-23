@@ -2,4 +2,7 @@
     <string name="app_name">Bulbul</string>
     <string name="main_activity_title">Bulbul</string>
     <string name="accessibility_service_description">Bulbul uses Accessibility to detect when you tap into a text input and to paste cleaned-up transcripts into the focused field. Audio is captured separately and only when you hold or tap the floating bubble.</string>
+    <string name="ime_name">Bulbul AI Voice Keyboard</string>
+    <string name="subtype_bn_in">Bengali (India)</string>
+    <string name="subtype_en_us">English</string>
 </resources>

@@ -197,6 +197,11 @@ pub async fn transcribe_model(
     }
 
     let custom_vocab = build_custom_vocab(vocabulary, is_coding_mode);
+    let mime_type = if wav_bytes.starts_with(b"OggS") {
+        "audio/ogg"
+    } else {
+        "audio/wav"
+    };
     let b64_audio = BASE64.encode(wav_bytes);
     let client = shared_client();
 
@@ -226,7 +231,7 @@ pub async fn transcribe_model(
                     "parts": [
                         {
                             "inlineData": {
-                                "mimeType": "audio/wav",
+                                "mimeType": mime_type,
                                 "data": b64_audio
                             }
                         }
@@ -254,7 +259,7 @@ pub async fn transcribe_model(
                     "parts": [
                         {
                             "inlineData": {
-                                "mimeType": "audio/wav",
+                                "mimeType": mime_type,
                                 "data": b64_audio
                             }
                         },

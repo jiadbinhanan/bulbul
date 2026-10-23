@@ -27,7 +27,15 @@
 //     bridge is in place)
 
 mod config;
+mod db;
+mod gemini;
+mod groq;
+mod model_config;
+pub mod opus_encoder;
+pub mod webdav;
 
+use std::time::Instant;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use config::Config;
 use serde_json::{json, Value};
 use tauri::Manager;
@@ -55,6 +63,9 @@ fn mobile_config_defaults(mut cfg: Config) -> Config {
 /// persisted flag so the first-launch wizard runs exactly once).
 #[tauri::command]
 fn get_config(app: tauri::AppHandle) -> Config {
+    if let Ok(dir) = app.path().app_data_dir() {
+        config::set_android_app_dir(dir);
+    }
     let cfg = read_config(&app).unwrap_or_default();
     mobile_config_defaults(cfg)
 }
@@ -67,6 +78,7 @@ fn get_config(app: tauri::AppHandle) -> Config {
 #[tauri::command]
 fn save_config(app: tauri::AppHandle, new_cfg: Config) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    config::set_android_app_dir(dir.clone());
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(MOBILE_CONFIG_FILE);
     let json = serde_json::to_string_pretty(&new_cfg).map_err(|e| e.to_string())?;
@@ -75,6 +87,7 @@ fn save_config(app: tauri::AppHandle, new_cfg: Config) -> Result<(), String> {
 
 fn read_config(app: &tauri::AppHandle) -> Option<Config> {
     let dir = app.path().app_data_dir().ok()?;
+    config::set_android_app_dir(dir.clone());
     let path = dir.join(MOBILE_CONFIG_FILE);
     if !path.exists() {
         return None;
@@ -124,40 +137,9 @@ fn history_rows(app: &tauri::AppHandle) -> Vec<Value> {
 }
 
 #[tauri::command]
-fn get_home_stats(app: tauri::AppHandle) -> Value {
-    let rows = history_rows(&app);
-    let total_words: u64 = rows.iter().map(|r| r["word_count"].as_u64().unwrap_or(0)).sum();
-    let total_fixes: u64 = rows.iter().map(|r| r["fix_count"].as_u64().unwrap_or(0)).sum();
-    let total_ms: u64 = rows.iter().map(|r| r["duration_ms"].as_u64().unwrap_or(0)).sum();
-    let wpm = if total_ms > 0 {
-        total_words as f64 / (total_ms as f64 / 60_000.0)
-    } else {
-        0.0
-    };
-    // Streak: consecutive UTC days with at least one dictation, counting
-    // back from today. Good enough without pulling in a timezone crate.
-    let mut days: Vec<i64> = rows
-        .iter()
-        .filter_map(|r| r["ts"].as_i64())
-        .map(|ts| ts / 86_400)
-        .collect();
-    days.sort_unstable();
-    days.dedup();
-    let today = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64 / 86_400)
-        .unwrap_or(0);
-    let mut streak = 0i64;
-    while days.binary_search(&(today - streak)).is_ok() {
-        streak += 1;
-    }
-    json!({
-        "total_words": total_words,
-        "total_dictations": rows.len(),
-        "total_fixes": total_fixes,
-        "wpm": wpm,
-        "day_streak": streak,
-    })
+fn get_home_stats() -> Result<db::HomeStats, String> {
+    let db = db::open().map_err(|e| format!("{e:#}"))?;
+    db::home_stats(&db).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -1672,6 +1654,24 @@ fn complete_onboarding(app: tauri::AppHandle) -> Result<(), String> {
     save_config(app, cfg)
 }
 
+#[tauri::command]
+fn open_keyboard_settings() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = jni_bridge::call_main_activity_static("openKeyboardSettings");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn show_keyboard_picker() -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = jni_bridge::call_main_activity_static("showKeyboardPicker");
+    }
+    Ok(())
+}
+
 // ---------- V2 Multi-Phase Dictation & History (Mobile implementation) ----------
 
 const CONTEXT_MODES_FILE: &str = "context_modes.json";
@@ -1764,143 +1764,72 @@ fn default_vocabulary_profiles() -> Vec<Value> {
 }
 
 #[tauri::command]
-fn list_recordings_v2(app: tauri::AppHandle, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<Value>, String> {
-    let limit = limit.unwrap_or(50) as usize;
-    let offset = offset.unwrap_or(0) as usize;
-    let rows = history_rows(&app);
-    let list: Vec<Value> = rows.iter()
-        .rev()
-        .skip(offset)
-        .take(limit)
-        .map(|r| {
-            let id_val = r["ts"].as_i64().unwrap_or_else(|| r["id"].as_i64().unwrap_or(0));
-            let id_str = id_val.to_string();
-            let created_at = r["ts"].as_i64().unwrap_or(0);
-            let duration_ms = r["duration_ms"].as_u64().unwrap_or(0);
-            let cleaned_text = r["cleaned_text"].as_str().unwrap_or("");
-            let is_pinned = r.get("is_pinned").and_then(|v| v.as_bool()).unwrap_or(false);
-            let mode = r.get("mode").and_then(|v| v.as_str()).unwrap_or("smart");
-            let model = r.get("model").and_then(|v| v.as_str()).unwrap_or("gemini-3.5-flash");
-            let latency_ms = r.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(350);
-            let fg_app = r.get("foreground_app").and_then(|v| v.as_str()).unwrap_or("com.bulbul.app");
-            let fg_display = r.get("foreground_app_display").and_then(|v| v.as_str()).unwrap_or("Android");
-
-            json!({
-                "recording": {
-                    "id": id_str,
-                    "audio_file_path": "",
-                    "duration_ms": duration_ms,
-                    "file_size_bytes": 0,
-                    "created_at": created_at,
-                    "is_pinned": is_pinned,
-                    "foreground_app": fg_app,
-                    "foreground_app_display": fg_display
-                },
-                "transcription_tries": [
-                    {
-                        "id": id_val,
-                        "recording_id": id_str,
-                        "provider": "gemini",
-                        "model": model,
-                        "mode": mode,
-                        "language_codes": ["bn", "en"],
-                        "vocabulary_profile_ids": [],
-                        "transcript_text": cleaned_text,
-                        "latency_ms": latency_ms,
-                        "created_at": created_at
-                    }
-                ],
-                "post_process_tries": []
-            })
-        })
-        .collect();
-    Ok(list)
+fn list_recordings_v2(limit: Option<u32>, offset: Option<u32>) -> Result<Vec<db::FullRecordingDetail>, String> {
+    let db = db::open().map_err(|e| format!("{e:#}"))?;
+    db::list_full_recordings(&db, limit.unwrap_or(50), offset.unwrap_or(0))
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-fn count_recordings_v2(app: tauri::AppHandle) -> Result<u64, String> {
-    Ok(history_rows(&app).len() as u64)
+fn count_recordings_v2() -> Result<u64, String> {
+    let db = db::open().map_err(|e| format!("{e:#}"))?;
+    let conn = db.lock();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM recordings WHERE deleted_at IS NULL", [], |r| r.get(0))
+        .unwrap_or(0);
+    Ok(count as u64)
 }
 
 #[tauri::command]
-fn get_full_recording_v2(app: tauri::AppHandle, id: String) -> Result<Option<Value>, String> {
-    let target_id = id.parse::<i64>().unwrap_or(0);
-    let rows = history_rows(&app);
-    if let Some(r) = rows.iter().find(|r| r["ts"].as_i64() == Some(target_id) || r["id"].as_i64() == Some(target_id)) {
-        let id_val = r["ts"].as_i64().unwrap_or(target_id);
-        let id_str = id_val.to_string();
-        let created_at = r["ts"].as_i64().unwrap_or(0);
-        let duration_ms = r["duration_ms"].as_u64().unwrap_or(0);
-        let cleaned_text = r["cleaned_text"].as_str().unwrap_or("");
-        let is_pinned = r.get("is_pinned").and_then(|v| v.as_bool()).unwrap_or(false);
-        let mode = r.get("mode").and_then(|v| v.as_str()).unwrap_or("smart");
-        let model = r.get("model").and_then(|v| v.as_str()).unwrap_or("gemini-3.5-flash");
-        let latency_ms = r.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(350);
-        let fg_app = r.get("foreground_app").and_then(|v| v.as_str()).unwrap_or("com.bulbul.app");
-        let fg_display = r.get("foreground_app_display").and_then(|v| v.as_str()).unwrap_or("Android");
+fn get_full_recording_v2(id: String) -> Result<Option<db::FullRecordingDetail>, String> {
+    let db = db::open().map_err(|e| format!("{e:#}"))?;
+    db::get_full_recording(&db, &id).map_err(|e| format!("{e:#}"))
+}
 
-        return Ok(Some(json!({
-            "recording": {
-                "id": id_str,
-                "audio_file_path": "",
-                "duration_ms": duration_ms,
-                "file_size_bytes": 0,
-                "created_at": created_at,
-                "is_pinned": is_pinned,
-                "foreground_app": fg_app,
-                "foreground_app_display": fg_display
-            },
-            "transcription_tries": [
-                {
-                    "id": id_val,
-                    "recording_id": id_str,
-                    "provider": "gemini",
-                    "model": model,
-                    "mode": mode,
-                    "language_codes": ["bn", "en"],
-                    "vocabulary_profile_ids": [],
-                    "transcript_text": cleaned_text,
-                    "latency_ms": latency_ms,
-                    "created_at": created_at
-                }
-            ],
-            "post_process_tries": []
-        })));
+#[tauri::command]
+fn delete_recording_v2(id: String) -> Result<(), String> {
+    let db = db::open().map_err(|e| format!("{e:#}"))?;
+    db::delete_recording(&db, &id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn toggle_recording_pinned(id: String) -> Result<bool, String> {
+    let db = db::open().map_err(|e| format!("{e:#}"))?;
+    db::toggle_recording_pinned(&db, &id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn get_recording_audio_bytes(
+    recording_id: String,
+) -> Result<String, String> {
+    let dir = config::recordings_dir().map_err(|e| format!("{e:#}"))?;
+    let opus_path = dir.join(format!("{recording_id}.opus"));
+    if opus_path.exists() {
+        let bytes = std::fs::read(&opus_path).map_err(|e| format!("reading opus audio file: {e:#}"))?;
+        let b64 = BASE64.encode(&bytes);
+        return Ok(format!("data:audio/ogg;base64,{b64}"));
     }
-    Ok(None)
-}
+    let wav_path = dir.join(format!("{recording_id}.wav"));
+    if wav_path.exists() {
+        let bytes = std::fs::read(&wav_path).map_err(|e| format!("reading wav audio file: {e:#}"))?;
+        let b64 = BASE64.encode(&bytes);
+        return Ok(format!("data:audio/wav;base64,{b64}"));
+    }
 
-#[tauri::command]
-fn delete_recording_v2(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let id_num = id.parse::<i64>().unwrap_or(0);
-    delete_dictation(app, id_num)
-}
-
-#[tauri::command]
-fn toggle_recording_pinned(app: tauri::AppHandle, id: String) -> Result<bool, String> {
-    let id_num = id.parse::<i64>().unwrap_or(0);
-    let mut rows = history_rows(&app);
-    let mut next = false;
-    for r in rows.iter_mut() {
-        if r["ts"].as_i64() == Some(id_num) || r["id"].as_i64() == Some(id_num) {
-            let cur = r.get("is_pinned").and_then(|v| v.as_bool()).unwrap_or(false);
-            next = !cur;
-            r["is_pinned"] = json!(next);
-            break;
+    // On-demand fetch from WebDAV cloud if enabled
+    let cfg = config::load();
+    if cfg.webdav_enabled {
+        if let Ok(client) = webdav::WebdavClient::from_config(&cfg) {
+            let remote_audio = format!("audio/{recording_id}.opus");
+            if let Ok(bytes) = client.get_file(&remote_audio).await {
+                let _ = std::fs::write(&opus_path, &bytes);
+                let b64 = BASE64.encode(&bytes);
+                return Ok(format!("data:audio/ogg;base64,{b64}"));
+            }
         }
     }
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let mut text = rows.iter().map(|r| r.to_string()).collect::<Vec<_>>().join("\n");
-    if !rows.is_empty() {
-        text.push('\n');
-    }
-    std::fs::write(dir.join(HISTORY_FILE), text).map_err(|e| e.to_string())?;
-    Ok(next)
-}
 
-#[tauri::command]
-fn get_recording_audio_bytes(_recording_id: String) -> Result<String, String> {
-    Ok("".to_string())
+    Err("Audio file not found".to_string())
 }
 
 #[tauri::command]
@@ -2050,27 +1979,983 @@ fn delete_vocabulary_profile(app: tauri::AppHandle, id: i64) -> Result<(), Strin
 }
 
 #[tauri::command]
-fn rerun_transcription(
-    _recording_id: String,
-    _provider: String,
-    _model: String,
-    _mode: String,
-    _custom_vocabulary: Option<Vec<String>>,
-) -> Result<Value, String> {
-    Err("Re-transcription is only available on desktop recordings.".to_string())
+async fn prune_unpinned_cloud_audio() -> Result<u32, String> {
+    let cfg = config::load();
+    let db = db::open().map_err(|e| format!("{e:#}"))?;
+    webdav::prune_unpinned_cloud_audio(&db, &cfg).await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-fn rerun_post_process(
-    _recording_id: String,
-    _transcription_try_id: i64,
-    _mode_name: String,
-    _provider: String,
-    _model: String,
-    _thinking_level: Option<String>,
-    _prompt: String,
-) -> Result<Value, String> {
-    Err("Re-post-processing is only available on desktop recordings.".to_string())
+async fn rerun_transcription(
+    recording_id: String,
+    provider: String,
+    model: String,
+    mode: String,
+    custom_vocabulary: Option<Vec<String>>,
+) -> Result<db::TranscriptionTryRow, String> {
+    let cfg = config::load();
+    let db = db::open().map_err(|e| format!("{e:#}"))?;
+
+    let dir = config::recordings_dir().map_err(|e| format!("{e:#}"))?;
+    let opus_path = dir.join(format!("{recording_id}.opus"));
+    let wav_path = dir.join(format!("{recording_id}.wav"));
+    let audio_bytes = if opus_path.exists() {
+        std::fs::read(&opus_path).map_err(|e| format!("reading opus audio: {e:#}"))?
+    } else if wav_path.exists() {
+        std::fs::read(&wav_path).map_err(|e| format!("reading wav audio: {e:#}"))?
+    } else {
+        if cfg.webdav_enabled {
+            let client = webdav::WebdavClient::from_config(&cfg).map_err(|e| format!("{e:#}"))?;
+            let remote_audio = format!("audio/{recording_id}.opus");
+            let bytes = client.get_file(&remote_audio).await.map_err(|e| format!("downloading audio from cloud: {e:#}"))?;
+            let _ = std::fs::write(&opus_path, &bytes);
+            bytes
+        } else {
+            return Err("Audio file not found".to_string());
+        }
+    };
+
+    let vocab = custom_vocabulary.unwrap_or_default();
+    let is_coding = mode.to_lowercase().contains("tech") || mode.to_lowercase().contains("code");
+
+    let t_start = Instant::now();
+    let (transcript, final_model) = if provider.to_lowercase() == "gemini" {
+        if model == "gemini-auto-fallback" || model.trim().is_empty() {
+            gemini::transcribe_with_fallback(
+                &cfg,
+                &audio_bytes,
+                &vocab,
+                is_coding,
+                Some(&mode),
+                None,
+                |_, _, _| {},
+            )
+            .await
+            .map_err(|e| format!("{e:#}"))?
+        } else {
+            let text = gemini::transcribe_model(
+                &cfg,
+                &model,
+                &audio_bytes,
+                &vocab,
+                is_coding,
+                Some(&mode),
+            )
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+            (text, model.clone())
+        }
+    } else {
+        let text = groq::transcribe(&cfg, audio_bytes, &vocab, None)
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+        (text, model.clone())
+    };
+    let latency_ms = t_start.elapsed().as_millis() as u64;
+
+    let try_id = db::save_transcription_try(
+        &db,
+        &recording_id,
+        &provider,
+        &final_model,
+        &mode,
+        &[mode.clone()],
+        &[],
+        &transcript,
+        latency_ms,
+    )
+    .map_err(|e| format!("{e:#}"))?;
+
+    let full = db::get_full_recording(&db, &recording_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| "Recording not found".to_string())?;
+
+    full.transcription_tries
+        .into_iter()
+        .find(|t| t.id == try_id)
+        .ok_or_else(|| "Failed to retrieve saved transcription try".to_string())
+}
+
+#[tauri::command]
+async fn rerun_post_process(
+    recording_id: String,
+    transcription_try_id: i64,
+    mode_name: String,
+    provider: String,
+    model: String,
+    thinking_level: Option<String>,
+    prompt: String,
+) -> Result<db::PostProcessTryRow, String> {
+    let cfg = config::load();
+    let db = db::open().map_err(|e| format!("{e:#}"))?;
+
+    let full = db::get_full_recording(&db, &recording_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| "Recording not found".to_string())?;
+
+    let trans_try = full
+        .transcription_tries
+        .into_iter()
+        .find(|t| t.id == transcription_try_id)
+        .ok_or_else(|| "Transcription try not found".to_string())?;
+
+    let t_start = Instant::now();
+    let output = if provider.to_lowercase() == "gemini" {
+        gemini::post_process(
+            &cfg,
+            &model,
+            &prompt,
+            &trans_try.transcript_text,
+            thinking_level.as_deref(),
+        )
+        .await
+        .map_err(|e| format!("{e:#}"))?
+    } else {
+        groq::post_process(&cfg, &model, &prompt, &trans_try.transcript_text)
+            .await
+            .map_err(|e| format!("{e:#}"))?
+    };
+    let latency_ms = t_start.elapsed().as_millis() as u64;
+
+    let try_id = db::save_post_process_try(
+        &db,
+        &recording_id,
+        transcription_try_id,
+        &mode_name,
+        &provider,
+        &model,
+        thinking_level.as_deref(),
+        &prompt,
+        &output,
+        latency_ms,
+    )
+    .map_err(|e| format!("{e:#}"))?;
+
+    let updated = db::get_full_recording(&db, &recording_id)
+        .map_err(|e| format!("{e:#}"))?
+        .ok_or_else(|| "Recording not found".to_string())?;
+
+    updated
+        .post_process_tries
+        .into_iter()
+        .find(|t| t.id == try_id)
+        .ok_or_else(|| "Failed to retrieve saved post-process try".to_string())
+}
+
+#[tauri::command]
+async fn test_webdav_connection(
+    url: String,
+    username: String,
+    password: String,
+    remote_dir: Option<String>,
+) -> Result<webdav::WebdavQuota, String> {
+    let dummy_cfg = Config {
+        webdav_enabled: true,
+        webdav_url: url,
+        webdav_username: username,
+        webdav_password: password,
+        webdav_remote_dir: remote_dir.unwrap_or_else(|| "/DictationApp".to_string()),
+        ..Default::default()
+    };
+    let client = webdav::WebdavClient::from_config(&dummy_cfg).map_err(|e| format!("{e:#}"))?;
+    client.test_connection().await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn sync_webdav_now(
+    _app: tauri::AppHandle,
+) -> Result<webdav::SyncStatusResult, String> {
+    let cfg = config::load();
+    let db = db::open().map_err(|e| format!("Failed to open DB: {e:#}"))?;
+    let dir = config::recordings_dir().map_err(|e| format!("{e:#}"))?;
+    
+    let res = webdav::run_sync(&db, &cfg, &dir).await.map_err(|e| format!("{e:#}"))?;
+    
+    if let Some(ts) = res.last_sync_at {
+        let mut c = cfg.clone();
+        c.webdav_last_sync_at = Some(ts);
+        let _ = config::save(&c);
+    }
+    
+    Ok(res)
+}
+
+#[tauri::command]
+async fn restore_webdav_backup(
+    _app: tauri::AppHandle,
+    url: String,
+    username: String,
+    password: String,
+    remote_dir: Option<String>,
+) -> Result<webdav::CredentialsBackup, String> {
+    let mut cfg = config::load();
+    cfg.webdav_enabled = true;
+    cfg.webdav_url = url;
+    cfg.webdav_username = username;
+    cfg.webdav_password = password;
+    cfg.webdav_remote_dir = remote_dir.unwrap_or_else(|| "/DictationApp".to_string());
+    
+    let db = db::open().map_err(|e| format!("Failed to open DB: {e:#}"))?;
+    let client = webdav::WebdavClient::from_config(&cfg).map_err(|e| format!("{e:#}"))?;
+    let backup = client.restore_credentials(&db, &mut cfg).await.map_err(|e| format!("{e:#}"))?;
+    
+    config::save(&cfg).map_err(|e| format!("{e:#}"))?;
+    
+    if let Ok(dir) = config::recordings_dir() {
+        let _ = webdav::run_sync(&db, &cfg, &dir).await;
+    }
+    
+    Ok(backup)
+}
+
+#[tauri::command]
+async fn get_webdav_sync_status(
+    _app: tauri::AppHandle,
+) -> Result<webdav::SyncStatusResult, String> {
+    let cfg = config::load();
+    if !cfg.webdav_enabled {
+        return Ok(webdav::SyncStatusResult {
+            connected: false,
+            last_sync_at: cfg.webdav_last_sync_at,
+            quota: None,
+            total_records_synced: 0,
+            message: "WebDAV sync is disabled".to_string(),
+        });
+    }
+    let client = match webdav::WebdavClient::from_config(&cfg) {
+        Ok(c) => c,
+        Err(e) => return Ok(webdav::SyncStatusResult {
+            connected: false,
+            last_sync_at: cfg.webdav_last_sync_at,
+            quota: None,
+            total_records_synced: 0,
+            message: format!("WebDAV configuration error: {e:#}"),
+        }),
+    };
+    
+    match client.get_quota().await {
+        Ok(q) => Ok(webdav::SyncStatusResult {
+            connected: true,
+            last_sync_at: cfg.webdav_last_sync_at,
+            quota: Some(q),
+            total_records_synced: 0,
+            message: "Connected to WebDAV".to_string(),
+        }),
+        Err(e) => Ok(webdav::SyncStatusResult {
+            connected: false,
+            last_sync_at: cfg.webdav_last_sync_at,
+            quota: None,
+            total_records_synced: 0,
+            message: format!("Connection failed: {e:#}"),
+        }),
+    }
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct ProcessAudioOptions {
+    pub language: Option<String>,
+    pub context_mode_id: Option<i64>,
+    pub phase1_mode: Option<String>,
+    pub vocab_enabled: Option<bool>,
+    pub vocab_profile_id: Option<i64>,
+    pub phase2_enabled: Option<bool>,
+    pub phase2_provider: Option<String>,
+    pub phase2_model: Option<String>,
+    pub thinking_level: Option<String>,
+    pub selected_text: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, Default)]
+pub struct ProcessAudioResult {
+    pub recording_id: String,
+    pub phase1_raw_text: String,
+    pub phase2_processed_text: String,
+    pub active_text: String,
+    pub transcription_try_id: i64,
+    pub post_process_try_id: Option<i64>,
+}
+
+async fn process_android_audio(
+    pcm_bytes: Vec<u8>,
+    sample_rate: u32,
+    opts: ProcessAudioOptions,
+) -> ProcessAudioResult {
+    if pcm_bytes.is_empty() {
+        return ProcessAudioResult::default();
+    }
+
+    let samples: Vec<i16> = pcm_bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+
+    let duration_ms = if sample_rate > 0 {
+        ((samples.len() as u64) * 1000) / (sample_rate as u64)
+    } else {
+        0
+    };
+
+    let opus = if sample_rate == 16000 {
+        opus_encoder::encode_pcm_to_ogg_opus(&samples).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let cfg = config::load();
+    let db = match db::open() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("failed to open db on android: {e:#}");
+            return ProcessAudioResult::default();
+        }
+    };
+
+    let recording_id = uuid::Uuid::new_v4().to_string();
+    let primary_audio = if !opus.is_empty() { &opus } else { &pcm_bytes };
+    let audio_file_name = if !opus.is_empty() {
+        format!("{recording_id}.opus")
+    } else {
+        format!("{recording_id}.wav")
+    };
+
+    if let Ok(dir) = config::recordings_dir() {
+        let p = dir.join(&audio_file_name);
+        let _ = std::fs::write(&p, primary_audio);
+    }
+
+    let _ = db::save_recording(
+        &db,
+        &recording_id,
+        &audio_file_name,
+        duration_ms,
+        primary_audio.len() as u64,
+        false,
+        Some("android.ime"),
+        Some("Bulbul Keyboard"),
+    );
+
+    let active_mode_id = opts.context_mode_id.unwrap_or(cfg.active_context_mode_id);
+    let context_mode = db::get_context_mode(&db, active_mode_id).ok().flatten()
+        .or_else(|| db::list_context_modes(&db).ok().and_then(|modes| modes.into_iter().next()));
+
+    // Resolve vocabulary based on options
+    let (mut vocabulary, active_vocab_ids) = if opts.vocab_enabled.unwrap_or(true) {
+        if let Some(prof_id) = opts.vocab_profile_id {
+            if prof_id > 0 {
+                if let Ok(profiles) = db::list_vocabulary_profiles(&db) {
+                    if let Some(p) = profiles.into_iter().find(|p| p.id == prof_id) {
+                        (p.terms, vec![prof_id])
+                    } else {
+                        db::get_active_vocabulary_terms(&db).unwrap_or_default()
+                    }
+                } else {
+                    db::get_active_vocabulary_terms(&db).unwrap_or_default()
+                }
+            } else {
+                db::get_active_vocabulary_terms(&db).unwrap_or_default()
+            }
+        } else {
+            db::get_active_vocabulary_terms(&db).unwrap_or_default()
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    if opts.vocab_enabled.unwrap_or(true) {
+        if let Ok(dict) = db::list_dictionary(&db) {
+            for entry in dict {
+                if !vocabulary.contains(&entry.to_word) {
+                    vocabulary.push(entry.to_word);
+                }
+            }
+        }
+    }
+
+    let lang_req = opts.language.as_deref().unwrap_or("auto");
+    let lang = if lang_req != "auto" && !lang_req.trim().is_empty() {
+        lang_req
+    } else {
+        &cfg.language
+    };
+
+    let is_bengali_gemini = lang == "bn-IN" || lang == "bn-IN-tech";
+    let is_coding = lang == "bn-IN-tech" || context_mode.as_ref().map(|m| m.name.to_lowercase().contains("code")).unwrap_or(false);
+    let phase1_mode = opts.phase1_mode.as_deref()
+        .unwrap_or_else(|| context_mode.as_ref().map(|m| m.default_phase1_mode.as_str()).unwrap_or("smart"));
+
+    let t_stt_start = Instant::now();
+    let mut model_used = if is_bengali_gemini {
+        "gemini-3.5-transcribe".to_string()
+    } else {
+        "whisper-large-v3".to_string()
+    };
+
+    let transcript = if is_bengali_gemini {
+        match gemini::transcribe_with_fallback(
+            &cfg,
+            primary_audio,
+            &vocabulary,
+            is_coding,
+            Some(phase1_mode),
+            None,
+            |_, _, _| {},
+        ).await {
+            Ok((t, m)) => {
+                model_used = m;
+                t
+            }
+            Err(e) => {
+                tracing::error!("Android Gemini STT failed: {e:#}");
+                return ProcessAudioResult {
+                    recording_id,
+                    ..Default::default()
+                };
+            }
+        }
+    } else {
+        match groq::transcribe(&cfg, primary_audio.to_vec(), &vocabulary, None).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Android Groq STT failed: {e:#}");
+                return ProcessAudioResult {
+                    recording_id,
+                    ..Default::default()
+                };
+            }
+        }
+    };
+
+    let t_stt_ms = t_stt_start.elapsed().as_millis() as u64;
+
+    let provider_name = if is_bengali_gemini { "gemini" } else { "groq" };
+    let language_codes = if is_bengali_gemini {
+        vec!["bn-IN".to_string(), "en-IN".to_string()]
+    } else {
+        vec![lang.to_string()]
+    };
+
+    let transcription_try_id = db::save_transcription_try(
+        &db,
+        &recording_id,
+        provider_name,
+        &model_used,
+        phase1_mode,
+        &language_codes,
+        &active_vocab_ids,
+        &transcript,
+        t_stt_ms,
+    ).unwrap_or(0);
+
+    if transcript.trim().is_empty() || (!is_bengali_gemini && groq::is_likely_hallucination(&transcript)) {
+        return ProcessAudioResult {
+            recording_id,
+            transcription_try_id,
+            ..Default::default()
+        };
+    }
+
+    let phase1_raw_text = transcript.clone();
+    let mut post_process_try_id = None;
+    let mut phase2_processed_text = String::new();
+
+    // Check if user spoke a voice command on selected text
+    if let Some(sel) = opts.selected_text.as_deref().filter(|s| !s.trim().is_empty()) {
+        let meta_prompt = "You are an expert editor. Follow the user's spoken instruction to transform the input text. Output ONLY the transformed text without preamble or quotes.";
+        let input_content = format!("User Instruction: {}\n\nInput Text:\n{}", transcript, sel);
+        let provider = opts.phase2_provider.as_deref().unwrap_or("gemini");
+        let model = opts.phase2_model.as_deref().unwrap_or("gemini-2.5-flash");
+        let t_p2 = Instant::now();
+
+        let p2_res = if provider.to_lowercase() == "gemini" {
+            gemini::post_process(&cfg, model, meta_prompt, &input_content, opts.thinking_level.as_deref()).await
+        } else {
+            groq::post_process(&cfg, model, meta_prompt, &input_content).await
+        };
+        let p2_lat = t_p2.elapsed().as_millis() as u64;
+
+        if let Ok(out) = p2_res {
+            if !out.trim().is_empty() {
+                let pid = db::save_post_process_try(
+                    &db,
+                    &recording_id,
+                    transcription_try_id,
+                    "Voice Edit Selection",
+                    provider,
+                    model,
+                    opts.thinking_level.as_deref(),
+                    meta_prompt,
+                    &out,
+                    p2_lat,
+                ).unwrap_or(0);
+                post_process_try_id = Some(pid);
+                phase2_processed_text = out;
+            }
+        }
+    } else {
+        let should_post_process = opts.phase2_enabled.unwrap_or_else(|| {
+            context_mode.as_ref().map(|m| m.phase2_enabled).unwrap_or(false)
+        });
+
+        if should_post_process {
+            let cm = context_mode.as_ref();
+            let provider = opts.phase2_provider.as_deref()
+                .or_else(|| cm.map(|m| m.phase2_provider.as_str()))
+                .unwrap_or("gemini");
+            let model = opts.phase2_model.as_deref()
+                .or_else(|| cm.map(|m| m.phase2_model.as_str()))
+                .unwrap_or("gemini-2.5-flash");
+            let think = opts.thinking_level.as_deref()
+                .or_else(|| cm.and_then(|m| m.thinking_level.as_deref()));
+            let prompt = cm.map(|m| m.system_prompt.as_str()).unwrap_or("Clean up and format this text nicely.");
+            let mode_name = cm.map(|m| m.name.as_str()).unwrap_or("Custom");
+
+            let t_p2 = Instant::now();
+            let p2_res = if provider.to_lowercase() == "gemini" {
+                gemini::post_process(&cfg, model, prompt, &transcript, think).await
+            } else {
+                groq::post_process(&cfg, model, prompt, &transcript).await
+            };
+            let p2_lat = t_p2.elapsed().as_millis() as u64;
+
+            if let Ok(out) = p2_res {
+                if !out.trim().is_empty() {
+                    let pid = db::save_post_process_try(
+                        &db,
+                        &recording_id,
+                        transcription_try_id,
+                        mode_name,
+                        provider,
+                        model,
+                        think,
+                        prompt,
+                        &out,
+                        p2_lat,
+                    ).unwrap_or(0);
+                    post_process_try_id = Some(pid);
+                    phase2_processed_text = out;
+                }
+            }
+        }
+    }
+
+    let active_text = if !phase2_processed_text.is_empty() {
+        phase2_processed_text.clone()
+    } else {
+        phase1_raw_text.clone()
+    };
+
+    // Auto-sync in background if enabled
+    if cfg.webdav_enabled && cfg.webdav_auto_sync {
+        let db_sync = db.clone();
+        let cfg_sync = cfg.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Ok(dir) = config::recordings_dir() {
+                let _ = webdav::run_sync(&db_sync, &cfg_sync, &dir).await;
+            }
+        });
+    }
+
+    ProcessAudioResult {
+        recording_id,
+        phase1_raw_text,
+        phase2_processed_text,
+        active_text,
+        transcription_try_id,
+        post_process_try_id,
+    }
+}
+
+fn get_action_prompt(action: &str) -> String {
+    match action.to_lowercase().as_str() {
+        "polish" => "You are an expert editor. Polish and improve this text for clarity, grammar, and natural flow while preserving its original meaning and tone. Output ONLY the polished text without preamble or quotes.".to_string(),
+        "translate" => "Translate this text accurately. If it is English, translate into natural Bengali (বাংলা). If it is Bengali or another language, translate into fluent English. Output ONLY the translated text without preamble or quotes.".to_string(),
+        "code" => "You are an expert software engineer. Refactor, format, or improve this code snippet. Output ONLY the transformed code directly without markdown code block fences if meant for inline insertion.".to_string(),
+        "email" => "You are a professional assistant. Rewrite this text into a polished, clear, and professional email message. Output ONLY the email body without preamble or quotes.".to_string(),
+        _ => "Improve and format this text nicely. Output ONLY the result without preamble or quotes.".to_string(),
+    }
+}
+
+async fn transform_android_selection(
+    selected_text: String,
+    action_type: String,
+    custom_prompt: Option<String>,
+) -> String {
+    if selected_text.trim().is_empty() {
+        return selected_text;
+    }
+    let cfg = config::load();
+    let prompt = if let Some(cp) = custom_prompt {
+        if !cp.trim().is_empty() {
+            cp
+        } else {
+            get_action_prompt(&action_type)
+        }
+    } else {
+        get_action_prompt(&action_type)
+    };
+
+    let model = if !cfg.gemini_api_key.trim().is_empty() {
+        "gemini-2.5-flash"
+    } else {
+        "llama-3.3-70b-versatile"
+    };
+
+    if !cfg.gemini_api_key.trim().is_empty() {
+        match gemini::post_process(&cfg, model, &prompt, &selected_text, None).await {
+            Ok(out) if !out.trim().is_empty() => out,
+            _ => selected_text,
+        }
+    } else if !cfg.groq_api_key.trim().is_empty() {
+        match groq::post_process(&cfg, model, &prompt, &selected_text).await {
+            Ok(out) if !out.trim().is_empty() => out,
+            _ => selected_text,
+        }
+    } else {
+        selected_text
+    }
+}
+
+async fn rerun_android_phase2(
+    recording_id: String,
+    transcription_try_id: i64,
+    mode_id: i64,
+    provider_override: Option<String>,
+    model_override: Option<String>,
+    thinking_level: Option<String>,
+) -> String {
+    let cfg = config::load();
+    let db = match db::open() {
+        Ok(d) => d,
+        Err(_) => return String::new(),
+    };
+
+    let full = match db::get_full_recording(&db, &recording_id) {
+        Ok(Some(f)) => f,
+        _ => return String::new(),
+    };
+
+    let trans_try = match full.transcription_tries.into_iter().find(|t| t.id == transcription_try_id) {
+        Some(t) => t,
+        None => return String::new(),
+    };
+
+    let mode = db::get_context_mode(&db, mode_id).ok().flatten()
+        .or_else(|| db::list_context_modes(&db).ok().and_then(|ms| ms.into_iter().next()));
+
+    let mode_name = mode.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| "Custom".to_string());
+    let provider = provider_override.or_else(|| mode.as_ref().map(|m| m.phase2_provider.clone())).unwrap_or_else(|| "gemini".to_string());
+    let model = model_override.or_else(|| mode.as_ref().map(|m| m.phase2_model.clone())).unwrap_or_else(|| "gemini-2.5-flash".to_string());
+    let think = thinking_level.or_else(|| mode.as_ref().and_then(|m| m.thinking_level.clone()));
+    let prompt = mode.as_ref().map(|m| m.system_prompt.clone()).unwrap_or_else(|| "Clean up and format this text nicely.".to_string());
+
+    let t_start = Instant::now();
+    let res = if provider.to_lowercase() == "gemini" {
+        gemini::post_process(&cfg, &model, &prompt, &trans_try.transcript_text, think.as_deref()).await
+    } else {
+        groq::post_process(&cfg, &model, &prompt, &trans_try.transcript_text).await
+    };
+    let lat = t_start.elapsed().as_millis() as u64;
+
+    match res {
+        Ok(out) if !out.trim().is_empty() => {
+            let _ = db::save_post_process_try(
+                &db,
+                &recording_id,
+                transcription_try_id,
+                &mode_name,
+                &provider,
+                &model,
+                think.as_deref(),
+                &prompt,
+                &out,
+                lat,
+            );
+            out
+        }
+        _ => trans_try.transcript_text,
+    }
+}
+
+fn get_recent_recordings_json(limit: u32) -> String {
+    let db = match db::open() {
+        Ok(d) => d,
+        Err(_) => return "[]".to_string(),
+    };
+    let recs = db::list_full_recordings(&db, limit, 0).unwrap_or_default();
+    let mut list = Vec::new();
+    for r in recs {
+        let active_text = r.post_process_tries.last().map(|p| p.output_text.clone())
+            .or_else(|| r.transcription_tries.last().map(|t| t.transcript_text.clone()))
+            .unwrap_or_default();
+        let raw_text = r.transcription_tries.last().map(|t| t.transcript_text.clone()).unwrap_or_default();
+        let mode = r.post_process_tries.last().map(|p| p.mode_name.clone())
+            .or_else(|| r.transcription_tries.last().map(|t| t.mode.clone()))
+            .unwrap_or_else(|| "Voice".to_string());
+
+        list.push(json!({
+            "id": r.recording.id,
+            "created_at": r.recording.created_at,
+            "duration_ms": r.recording.duration_ms,
+            "active_text": active_text,
+            "raw_text": raw_text,
+            "mode": mode,
+            "is_pinned": r.recording.is_pinned
+        }));
+    }
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn get_vocabulary_profiles_json() -> String {
+    let db = match db::open() {
+        Ok(d) => d,
+        Err(_) => return "[]".to_string(),
+    };
+    let profiles = db::list_vocabulary_profiles(&db).unwrap_or_default();
+    let list: Vec<Value> = profiles.into_iter().map(|p| {
+        json!({
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "is_active": p.is_active,
+            "term_count": p.terms.len(),
+        })
+    }).collect();
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn toggle_vocabulary_profile_jni(id: i64) -> bool {
+    let db = match db::open() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    db::toggle_vocabulary_profile(&db, id).is_ok()
+}
+
+fn get_context_modes_json() -> String {
+    let db = match db::open() {
+        Ok(d) => d,
+        Err(_) => return "[]".to_string(),
+    };
+    let modes = db::list_context_modes(&db).unwrap_or_default();
+    let list: Vec<Value> = modes.into_iter().map(|m| {
+        json!({
+            "id": m.id,
+            "name": m.name,
+            "icon": m.icon,
+            "default_phase1_mode": m.default_phase1_mode,
+            "phase2_enabled": m.phase2_enabled,
+            "phase2_provider": m.phase2_provider,
+            "phase2_model": m.phase2_model,
+            "thinking_level": m.thinking_level,
+        })
+    }).collect();
+    serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string())
+}
+
+#[cfg(target_os = "android")]
+pub mod jni_bridge {
+    use super::*;
+    use jni::objects::{JByteArray, JClass, JString};
+    use jni::sys::{jboolean, jint, jlong, jstring};
+    use jni::JNIEnv;
+
+    static JVM: std::sync::OnceLock<jni::JavaVM> = std::sync::OnceLock::new();
+
+    pub fn call_main_activity_static(method: &str) -> Result<(), String> {
+        let vm = JVM.get().ok_or_else(|| "JavaVM not initialized yet".to_string())?;
+        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+        let class = env.find_class("com/bulbul/app/MainActivity").map_err(|e| e.to_string())?;
+        env.call_static_method(class, method, "()V", &[]).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_initDataDir(
+        mut env: JNIEnv,
+        _class: JClass,
+        dir_path: JString,
+    ) {
+        if let Ok(vm) = env.get_java_vm() {
+            let _ = JVM.set(vm);
+        }
+        if let Ok(p) = env.get_string(&dir_path) {
+            let s: String = p.into();
+            if !s.trim().is_empty() {
+                config::set_android_app_dir(std::path::PathBuf::from(s));
+            }
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_processVoiceAudio(
+        mut env: JNIEnv,
+        _class: JClass,
+        pcm_bytes: JByteArray,
+        sample_rate: jint,
+        language: JString,
+        context_mode_id: jlong,
+    ) -> jstring {
+        let pcm_vec = env.convert_byte_array(&pcm_bytes).unwrap_or_default();
+        let lang: String = env
+            .get_string(&language)
+            .map(|s| s.into())
+            .unwrap_or_else(|_| "auto".to_string());
+
+        let opts = ProcessAudioOptions {
+            language: Some(lang),
+            context_mode_id: Some(context_mode_id),
+            ..Default::default()
+        };
+
+        let res = tauri::async_runtime::block_on(async move {
+            process_android_audio(pcm_vec, sample_rate as u32, opts).await
+        });
+
+        let out = env.new_string(&res.active_text).unwrap_or_else(|_| env.new_string("").unwrap());
+        out.into_raw()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_processVoiceAudioWithOptions(
+        mut env: JNIEnv,
+        _class: JClass,
+        pcm_bytes: JByteArray,
+        sample_rate: jint,
+        options_json: JString,
+    ) -> jstring {
+        let pcm_vec = env.convert_byte_array(&pcm_bytes).unwrap_or_default();
+        let opt_str: String = env
+            .get_string(&options_json)
+            .map(|s| s.into())
+            .unwrap_or_default();
+
+        let opts: ProcessAudioOptions = serde_json::from_str(&opt_str).unwrap_or_default();
+
+        let res = tauri::async_runtime::block_on(async move {
+            process_android_audio(pcm_vec, sample_rate as u32, opts).await
+        });
+
+        let json_str = serde_json::to_string(&res).unwrap_or_else(|_| "{}".to_string());
+        let out = env.new_string(&json_str).unwrap_or_else(|_| env.new_string("").unwrap());
+        out.into_raw()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_transformSelectedText(
+        mut env: JNIEnv,
+        _class: JClass,
+        selected_text: JString,
+        action_type: JString,
+        custom_prompt: JString,
+    ) -> jstring {
+        let sel: String = env.get_string(&selected_text).map(|s| s.into()).unwrap_or_default();
+        let act: String = env.get_string(&action_type).map(|s| s.into()).unwrap_or_default();
+        let prompt: Option<String> = env.get_string(&custom_prompt).ok().map(|s| s.into()).filter(|s: &String| !s.trim().is_empty());
+
+        let transformed = tauri::async_runtime::block_on(async move {
+            transform_android_selection(sel, act, prompt).await
+        });
+
+        let out = env.new_string(&transformed).unwrap_or_else(|_| env.new_string("").unwrap());
+        out.into_raw()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_rerunPhase2(
+        mut env: JNIEnv,
+        _class: JClass,
+        recording_id: JString,
+        transcription_try_id: jlong,
+        mode_id: jlong,
+        provider: JString,
+        model: JString,
+        thinking_level: JString,
+    ) -> jstring {
+        let rec_id: String = env.get_string(&recording_id).map(|s| s.into()).unwrap_or_default();
+        let prov: Option<String> = env.get_string(&provider).ok().map(|s| s.into()).filter(|s: &String| !s.trim().is_empty());
+        let mdl: Option<String> = env.get_string(&model).ok().map(|s| s.into()).filter(|s: &String| !s.trim().is_empty());
+        let think: Option<String> = env.get_string(&thinking_level).ok().map(|s| s.into()).filter(|s: &String| !s.trim().is_empty());
+
+        let res = tauri::async_runtime::block_on(async move {
+            rerun_android_phase2(rec_id, transcription_try_id, mode_id, prov, mdl, think).await
+        });
+
+        let out = env.new_string(&res).unwrap_or_else(|_| env.new_string("").unwrap());
+        out.into_raw()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_getRecentRecordings(
+        env: JNIEnv,
+        _class: JClass,
+        limit: jint,
+    ) -> jstring {
+        let json_str = get_recent_recordings_json(limit as u32);
+        let out = env.new_string(&json_str).unwrap_or_else(|_| env.new_string("").unwrap());
+        out.into_raw()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_getVocabularyProfiles(
+        env: JNIEnv,
+        _class: JClass,
+    ) -> jstring {
+        let json_str = get_vocabulary_profiles_json();
+        let out = env.new_string(&json_str).unwrap_or_else(|_| env.new_string("").unwrap());
+        out.into_raw()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_toggleVocabularyProfile(
+        _env: JNIEnv,
+        _class: JClass,
+        id: jlong,
+        _active: jboolean,
+    ) -> jboolean {
+        if toggle_vocabulary_profile_jni(id) {
+            1
+        } else {
+            0
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_getContextModes(
+        env: JNIEnv,
+        _class: JClass,
+    ) -> jstring {
+        let json_str = get_context_modes_json();
+        let out = env.new_string(&json_str).unwrap_or_else(|_| env.new_string("").unwrap());
+        out.into_raw()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_bulbul_app_BulbulBridge_syncWebdav(
+        env: JNIEnv,
+        _class: JClass,
+    ) -> jstring {
+        let status = tauri::async_runtime::block_on(async move {
+            let cfg = config::load();
+            if !cfg.webdav_enabled {
+                return "WebDAV sync disabled".to_string();
+            }
+            if let Ok(dir) = config::recordings_dir() {
+                if let Ok(db) = db::open() {
+                    match webdav::run_sync(&db, &cfg, &dir).await {
+                        Ok(res) => res.message,
+                        Err(e) => format!("Sync error: {e:#}"),
+                    }
+                } else {
+                    "Database init failed".to_string()
+                }
+            } else {
+                "Recordings dir unavailable".to_string()
+            }
+        });
+
+        let out = env.new_string(&status).unwrap_or_else(|_| env.new_string("").unwrap());
+        out.into_raw()
+    }
 }
 
 // ---------- Entry point ----------
@@ -2141,6 +3026,8 @@ pub fn run() {
             set_overlay_height,
             open_scratchpad,
             complete_onboarding,
+            open_keyboard_settings,
+            show_keyboard_picker,
             // V2 Multi-Phase Dictation & History
             list_recordings_v2,
             count_recordings_v2,
@@ -2159,6 +3046,12 @@ pub fn run() {
             delete_vocabulary_profile,
             rerun_transcription,
             rerun_post_process,
+            // WebDAV Cloud Sync
+            test_webdav_connection,
+            sync_webdav_now,
+            restore_webdav_backup,
+            get_webdav_sync_status,
+            prune_unpinned_cloud_audio,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Bulbul on mobile");

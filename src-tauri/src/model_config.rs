@@ -124,6 +124,7 @@ async fn fetch_and_cache_once(api_key: &str) -> Result<()> {
 /// after boot, then a steady cadence, forever. Failures are logged and
 /// swallowed — the cache just keeps whatever it last had (or the caller's
 /// embedded seed chain, if nothing has ever succeeded yet).
+#[cfg(desktop)]
 pub fn spawn_model_config_watcher(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(10)).await;

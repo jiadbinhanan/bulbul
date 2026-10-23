@@ -28,7 +28,34 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import java.io.File
 
+import android.content.Context
+import android.view.inputmethod.InputMethodManager
+import androidx.core.app.ActivityCompat
+
 class MainActivity : TauriActivity() {
+  companion object {
+    @JvmStatic
+    var instance: MainActivity? = null
+
+    @JvmStatic
+    fun openKeyboardSettings() {
+      instance?.let { ctx ->
+        val intent = Intent(Settings.ACTION_INPUT_METHOD_SETTINGS).apply {
+          flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        ctx.startActivity(intent)
+      }
+    }
+
+    @JvmStatic
+    fun showKeyboardPicker() {
+      instance?.let { ctx ->
+        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.showInputMethodPicker()
+      }
+    }
+  }
+
   private var configObserver: FileObserver? = null
   private var permissionBanner: View? = null
   private var webView: WebView? = null
@@ -36,30 +63,18 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
-    // The app draws edge-to-edge behind the status/nav bars, so the
-    // system icon colour must track the *in-app* theme (which the user
-    // controls independently of the OS theme). Without this, light mode
-    // over a dark OS theme leaves white status icons invisible on the
-    // app's white top — the "notification bar hidden in the whites" bug.
+    instance = this
+    BulbulBridge.ensureInitialized(this)
+
+    // Smooth runtime request for mic if not yet granted
+    if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) !=
+      PackageManager.PERMISSION_GRANTED) {
+      ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 101)
+    }
+
     applyBarAppearance()
     startConfigWatch()
-    // Opt-in engagement ping (no content). No-ops unless telemetry is on.
     Telemetry.track(this, "app_opened", org.json.JSONObject())
-    // Launch the setup walker on top of the Tauri webview if any of
-    // the three system permissions Bulbul depends on aren't granted.
-    // Doing this in onCreate (not onResume) means the webview keeps
-    // loading underneath — by the time the user finishes setup the
-    // dashboard is ready, so they don't see a second loading spinner.
-    //
-    // First launch only: if permissions are missing, open the full setup
-    // walker. Later returns — backing out of setup, or a permission revoked
-    // while the app runs — are handled more gently in onResume via a
-    // dismissible in-app banner (see showPermissionBanner) rather than
-    // force-reopening SetupActivity, so the user is never trapped but also
-    // never left on a silently non-functional app.
-    if (!hasAllPermissions() || !SetupActivity.heroSeenStatic(this)) {
-      startActivity(Intent(this, SetupActivity::class.java))
-    }
   }
 
   /// WryActivity's hook for when the Tauri webview is created (see
@@ -120,19 +135,13 @@ class MainActivity : TauriActivity() {
 
   override fun onResume() {
     super.onResume()
-    // Catch a theme change made while we were backgrounded (or an OS
-    // theme flip when the app is set to "system").
     applyBarAppearance()
-    // Re-check permissions on every return to the foreground. If any of the
-    // three Bulbul needs is missing — the user backed out of setup, or
-    // revoked one in system settings while the app ran — surface a
-    // dismissible banner offering a one-tap jump back to setup, rather than
-    // auto-relaunching SetupActivity (which would trap a user just looking
-    // around) or leaving the app silently non-functional.
-    if (hasAllPermissions()) hidePermissionBanner() else showPermissionBanner()
+    // System keyboard (IME) is primary and does not require accessibility or overlay.
+    hidePermissionBanner()
   }
 
   override fun onDestroy() {
+    if (instance == this) instance = null
     configObserver?.stopWatching()
     configObserver = null
     super.onDestroy()

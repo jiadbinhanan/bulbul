@@ -98,7 +98,7 @@ export default function Overlay() {
       if (payload.state === "idle" && payload.message) {
         let kind = null;
         if (/too short/i.test(payload.message)) kind = "too_short";
-        else if (/(silence|no speech)/i.test(payload.message)) kind = "silent";
+        else if (/(silence|no speech|too quiet|quiet)/i.test(payload.message)) kind = "silent";
         if (kind) setTransientReject({ kind, message: payload.message });
       }
     });

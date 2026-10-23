@@ -323,11 +323,40 @@ pub struct Config {
     /// Whether Phase 2 Post-Processing is enabled globally / on active dictation.
     #[serde(default = "default_phase2_enabled")]
     pub phase2_enabled: bool,
+
+    /// Whether the floating bubble overlay is enabled on Android (default false; System Keyboard is primary).
+    #[serde(default = "default_floating_bubble_enabled")]
+    pub floating_bubble_enabled: bool,
+
+    /// WebDAV Cloud Sync settings
+    #[serde(default)]
+    pub webdav_enabled: bool,
+    #[serde(default)]
+    pub webdav_url: String,
+    #[serde(default)]
+    pub webdav_username: String,
+    #[serde(default)]
+    pub webdav_password: String,
+    #[serde(default = "default_webdav_remote_dir")]
+    pub webdav_remote_dir: String,
+    #[serde(default = "default_webdav_sync_audio")]
+    pub webdav_sync_audio: bool,
+    #[serde(default = "default_webdav_auto_sync")]
+    pub webdav_auto_sync: bool,
+    #[serde(default = "default_webdav_sync_interval_mins")]
+    pub webdav_sync_interval_mins: u32,
+    #[serde(default)]
+    pub webdav_last_sync_at: Option<i64>,
 }
 
 fn default_active_context_mode_id() -> i64 { 1 }
 fn default_phase1_mode() -> String { "SMART".to_string() }
 fn default_phase2_enabled() -> bool { false }
+fn default_floating_bubble_enabled() -> bool { false }
+fn default_webdav_remote_dir() -> String { "/DictationApp".to_string() }
+fn default_webdav_sync_audio() -> bool { true }
+fn default_webdav_auto_sync() -> bool { true }
+fn default_webdav_sync_interval_mins() -> u32 { 15 }
 
 
 fn default_polish_hotkey() -> String {
@@ -637,6 +666,16 @@ impl Default for Config {
             active_context_mode_id: default_active_context_mode_id(),
             phase1_mode: default_phase1_mode(),
             phase2_enabled: default_phase2_enabled(),
+            floating_bubble_enabled: default_floating_bubble_enabled(),
+            webdav_enabled: false,
+            webdav_url: String::new(),
+            webdav_username: String::new(),
+            webdav_password: String::new(),
+            webdav_remote_dir: default_webdav_remote_dir(),
+            webdav_sync_audio: default_webdav_sync_audio(),
+            webdav_auto_sync: default_webdav_auto_sync(),
+            webdav_sync_interval_mins: default_webdav_sync_interval_mins(),
+            webdav_last_sync_at: None,
         }
     }
 }
@@ -697,11 +736,46 @@ impl Config {
 
 
 
+#[allow(dead_code)]
+static ANDROID_APP_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+#[allow(dead_code)]
+pub fn set_android_app_dir(path: PathBuf) {
+    let _ = ANDROID_APP_DIR.set(path);
+}
+
 pub fn config_dir() -> Result<PathBuf> {
-    let base = dirs::config_dir().context("could not resolve %APPDATA%")?;
-    let dir = base.join("Bulbul");
-    fs::create_dir_all(&dir).with_context(|| format!("creating {:?}", dir))?;
-    Ok(dir)
+    #[cfg(target_os = "android")]
+    {
+        if let Some(dir) = ANDROID_APP_DIR.get() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {:?}", dir))?;
+            return Ok(dir.clone());
+        }
+        for candidate in &[
+            "/data/user/0/com.bulbul.app/files",
+            "/data/data/com.bulbul.app/files",
+            "/data/user/0/xyz.bulbultypes.app/files",
+            "/data/data/xyz.bulbultypes.app/files",
+        ] {
+            let p = PathBuf::from(candidate);
+            if p.exists() {
+                let _ = ANDROID_APP_DIR.set(p.clone());
+                return Ok(p);
+            }
+        }
+        let fallback = PathBuf::from("/data/data/com.bulbul.app/files");
+        let _ = fs::create_dir_all(&fallback);
+        let _ = ANDROID_APP_DIR.set(fallback.clone());
+        Ok(fallback)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let base = dirs::config_dir().context("could not resolve %APPDATA%")?;
+        let dir = base.join("Bulbul");
+        fs::create_dir_all(&dir).with_context(|| format!("creating {:?}", dir))?;
+        Ok(dir)
+    }
 }
 
 pub fn config_path() -> Result<PathBuf> {

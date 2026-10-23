@@ -107,7 +107,10 @@ CREATE TABLE IF NOT EXISTS recordings (
     created_at          INTEGER NOT NULL,
     is_pinned           INTEGER NOT NULL DEFAULT 0,
     foreground_app      TEXT,
-    foreground_app_display TEXT
+    foreground_app_display TEXT,
+    remote_etag         TEXT,
+    synced_at           INTEGER,
+    deleted_at          INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_recordings_created ON recordings(created_at DESC);
@@ -123,6 +126,8 @@ CREATE TABLE IF NOT EXISTS transcription_tries (
     transcript_text         TEXT NOT NULL,
     latency_ms              INTEGER NOT NULL,
     created_at              INTEGER NOT NULL,
+    remote_etag             TEXT,
+    synced_at               INTEGER,
     FOREIGN KEY(recording_id) REFERENCES recordings(id) ON DELETE CASCADE
 );
 
@@ -140,6 +145,8 @@ CREATE TABLE IF NOT EXISTS post_process_tries (
     output_text             TEXT NOT NULL,
     latency_ms              INTEGER NOT NULL,
     created_at              INTEGER NOT NULL,
+    remote_etag             TEXT,
+    synced_at               INTEGER,
     FOREIGN KEY(recording_id) REFERENCES recordings(id) ON DELETE CASCADE,
     FOREIGN KEY(transcription_try_id) REFERENCES transcription_tries(id) ON DELETE CASCADE
 );
@@ -153,7 +160,9 @@ CREATE TABLE IF NOT EXISTS vocabulary_profiles (
     description     TEXT NOT NULL DEFAULT '',
     terms_json      TEXT NOT NULL,
     is_active       INTEGER NOT NULL DEFAULT 1,
-    created_at      INTEGER NOT NULL
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER,
+    deleted_at      INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS context_modes (
@@ -168,7 +177,9 @@ CREATE TABLE IF NOT EXISTS context_modes (
     thinking_level          TEXT DEFAULT 'medium',
     hotkey                  TEXT,
     sort_order              INTEGER NOT NULL DEFAULT 0,
-    created_at              INTEGER NOT NULL
+    created_at              INTEGER NOT NULL,
+    updated_at              INTEGER,
+    deleted_at              INTEGER
 );
 "#;
 
@@ -326,6 +337,19 @@ fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE transforms ADD COLUMN hotkey TEXT", []);
     let _ = conn.execute("ALTER TABLE recordings ADD COLUMN foreground_app TEXT", []);
     let _ = conn.execute("ALTER TABLE recordings ADD COLUMN foreground_app_display TEXT", []);
+    // WebDAV sync metadata columns
+    let _ = conn.execute("ALTER TABLE recordings ADD COLUMN remote_etag TEXT", []);
+    let _ = conn.execute("ALTER TABLE recordings ADD COLUMN synced_at INTEGER", []);
+    let _ = conn.execute("ALTER TABLE recordings ADD COLUMN deleted_at INTEGER", []);
+    let _ = conn.execute("ALTER TABLE transcription_tries ADD COLUMN remote_etag TEXT", []);
+    let _ = conn.execute("ALTER TABLE transcription_tries ADD COLUMN synced_at INTEGER", []);
+    let _ = conn.execute("ALTER TABLE post_process_tries ADD COLUMN remote_etag TEXT", []);
+    let _ = conn.execute("ALTER TABLE post_process_tries ADD COLUMN synced_at INTEGER", []);
+    let _ = conn.execute("ALTER TABLE vocabulary_profiles ADD COLUMN updated_at INTEGER", []);
+    let _ = conn.execute("ALTER TABLE vocabulary_profiles ADD COLUMN deleted_at INTEGER", []);
+    let _ = conn.execute("ALTER TABLE context_modes ADD COLUMN updated_at INTEGER", []);
+    let _ = conn.execute("ALTER TABLE context_modes ADD COLUMN deleted_at INTEGER", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_recordings_deleted ON recordings(deleted_at)", []);
     Ok(())
 }
 
@@ -2330,6 +2354,9 @@ pub struct RecordingRow {
     pub is_pinned: bool,
     pub foreground_app: Option<String>,
     pub foreground_app_display: Option<String>,
+    pub remote_etag: Option<String>,
+    pub synced_at: Option<i64>,
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2344,6 +2371,8 @@ pub struct TranscriptionTryRow {
     pub transcript_text: String,
     pub latency_ms: u64,
     pub created_at: i64,
+    pub remote_etag: Option<String>,
+    pub synced_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2359,6 +2388,8 @@ pub struct PostProcessTryRow {
     pub output_text: String,
     pub latency_ms: u64,
     pub created_at: i64,
+    pub remote_etag: Option<String>,
+    pub synced_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2369,6 +2400,8 @@ pub struct VocabularyProfileRow {
     pub terms: Vec<String>,
     pub is_active: bool,
     pub created_at: i64,
+    pub updated_at: Option<i64>,
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2385,6 +2418,8 @@ pub struct ContextModeRow {
     pub hotkey: Option<String>,
     pub sort_order: i64,
     pub created_at: i64,
+    pub updated_at: Option<i64>,
+    pub deleted_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2482,8 +2517,9 @@ pub fn save_post_process_try(
 pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<FullRecordingDetail>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(
-        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned, foreground_app, foreground_app_display
+        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned, foreground_app, foreground_app_display, remote_etag, synced_at, deleted_at
          FROM recordings
+         WHERE deleted_at IS NULL
          ORDER BY created_at DESC
          LIMIT ? OFFSET ?",
     )?;
@@ -2498,6 +2534,9 @@ pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<Full
                 is_pinned: row.get::<_, i64>(5)? != 0,
                 foreground_app: row.get(6)?,
                 foreground_app_display: row.get(7)?,
+                remote_etag: row.get(8)?,
+                synced_at: row.get(9)?,
+                deleted_at: row.get(10)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2505,7 +2544,7 @@ pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<Full
     let mut details = Vec::new();
     for rec in recording_rows {
         let mut t_stmt = conn.prepare(
-            "SELECT id, recording_id, provider, model, mode, language_codes, vocabulary_profile_ids, transcript_text, latency_ms, created_at
+            "SELECT id, recording_id, provider, model, mode, language_codes, vocabulary_profile_ids, transcript_text, latency_ms, created_at, remote_etag, synced_at
              FROM transcription_tries
              WHERE recording_id = ?
              ORDER BY created_at ASC",
@@ -2525,12 +2564,14 @@ pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<Full
                     transcript_text: row.get(7)?,
                     latency_ms: row.get::<_, i64>(8)? as u64,
                     created_at: row.get(9)?,
+                    remote_etag: row.get(10)?,
+                    synced_at: row.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut p_stmt = conn.prepare(
-            "SELECT id, recording_id, transcription_try_id, mode_name, provider, model, thinking_level, prompt_snapshot, output_text, latency_ms, created_at
+            "SELECT id, recording_id, transcription_try_id, mode_name, provider, model, thinking_level, prompt_snapshot, output_text, latency_ms, created_at, remote_etag, synced_at
              FROM post_process_tries
              WHERE recording_id = ?
              ORDER BY created_at ASC",
@@ -2549,6 +2590,8 @@ pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<Full
                     output_text: row.get(8)?,
                     latency_ms: row.get::<_, i64>(9)? as u64,
                     created_at: row.get(10)?,
+                    remote_etag: row.get(11)?,
+                    synced_at: row.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -2566,7 +2609,7 @@ pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<Full
 pub fn get_full_recording(db: &Db, recording_id: &str) -> Result<Option<FullRecordingDetail>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(
-        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned, foreground_app, foreground_app_display
+        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned, foreground_app, foreground_app_display, remote_etag, synced_at, deleted_at
          FROM recordings
          WHERE id = ?",
     )?;
@@ -2580,6 +2623,9 @@ pub fn get_full_recording(db: &Db, recording_id: &str) -> Result<Option<FullReco
             is_pinned: row.get::<_, i64>(5)? != 0,
             foreground_app: row.get(6)?,
             foreground_app_display: row.get(7)?,
+            remote_etag: row.get(8)?,
+            synced_at: row.get(9)?,
+            deleted_at: row.get(10)?,
         })
     })?;
 
@@ -2589,7 +2635,7 @@ pub fn get_full_recording(db: &Db, recording_id: &str) -> Result<Option<FullReco
     };
 
     let mut t_stmt = conn.prepare(
-        "SELECT id, recording_id, provider, model, mode, language_codes, vocabulary_profile_ids, transcript_text, latency_ms, created_at
+        "SELECT id, recording_id, provider, model, mode, language_codes, vocabulary_profile_ids, transcript_text, latency_ms, created_at, remote_etag, synced_at
          FROM transcription_tries
          WHERE recording_id = ?
          ORDER BY created_at ASC",
@@ -2609,12 +2655,14 @@ pub fn get_full_recording(db: &Db, recording_id: &str) -> Result<Option<FullReco
                 transcript_text: row.get(7)?,
                 latency_ms: row.get::<_, i64>(8)? as u64,
                 created_at: row.get(9)?,
+                remote_etag: row.get(10)?,
+                synced_at: row.get(11)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut p_stmt = conn.prepare(
-        "SELECT id, recording_id, transcription_try_id, mode_name, provider, model, thinking_level, prompt_snapshot, output_text, latency_ms, created_at
+        "SELECT id, recording_id, transcription_try_id, mode_name, provider, model, thinking_level, prompt_snapshot, output_text, latency_ms, created_at, remote_etag, synced_at
          FROM post_process_tries
          WHERE recording_id = ?
          ORDER BY created_at ASC",
@@ -2633,6 +2681,8 @@ pub fn get_full_recording(db: &Db, recording_id: &str) -> Result<Option<FullReco
                 output_text: row.get(8)?,
                 latency_ms: row.get::<_, i64>(9)? as u64,
                 created_at: row.get(10)?,
+                remote_etag: row.get(11)?,
+                synced_at: row.get(12)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2644,7 +2694,180 @@ pub fn get_full_recording(db: &Db, recording_id: &str) -> Result<Option<FullReco
     }))
 }
 
+pub fn soft_delete_recording(db: &Db, recording_id: &str) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE recordings SET deleted_at = ? WHERE id = ?",
+        params![now, recording_id],
+    )?;
+    Ok(())
+}
+
+pub fn update_recording_sync_metadata(
+    db: &Db,
+    recording_id: &str,
+    remote_etag: Option<&str>,
+    synced_at: i64,
+) -> Result<()> {
+    let conn = db.lock();
+    conn.execute(
+        "UPDATE recordings SET remote_etag = ?, synced_at = ? WHERE id = ?",
+        params![remote_etag, synced_at, recording_id],
+    )?;
+    Ok(())
+}
+
+pub fn list_all_recordings_including_deleted(db: &Db) -> Result<Vec<RecordingRow>> {
+    let conn = db.lock();
+    let mut stmt = conn.prepare(
+        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned, foreground_app, foreground_app_display, remote_etag, synced_at, deleted_at
+         FROM recordings
+         ORDER BY created_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(RecordingRow {
+                id: row.get(0)?,
+                audio_file_path: row.get(1)?,
+                duration_ms: row.get::<_, i64>(2)? as u64,
+                file_size_bytes: row.get::<_, i64>(3)? as u64,
+                created_at: row.get(4)?,
+                is_pinned: row.get::<_, i64>(5)? != 0,
+                foreground_app: row.get(6)?,
+                foreground_app_display: row.get(7)?,
+                remote_etag: row.get(8)?,
+                synced_at: row.get(9)?,
+                deleted_at: row.get(10)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn list_transcription_tries(db: &Db, recording_id: &str) -> Result<Vec<TranscriptionTryRow>> {
+    let conn = db.lock();
+    let mut t_stmt = conn.prepare(
+        "SELECT id, recording_id, provider, model, mode, language_codes, vocabulary_profile_ids, transcript_text, latency_ms, created_at, remote_etag, synced_at
+         FROM transcription_tries
+         WHERE recording_id = ?
+         ORDER BY created_at ASC",
+    )?;
+    let tries = t_stmt
+        .query_map([recording_id], |row| {
+            let lang_str: String = row.get(5)?;
+            let vocab_str: String = row.get(6)?;
+            Ok(TranscriptionTryRow {
+                id: row.get(0)?,
+                recording_id: row.get(1)?,
+                provider: row.get(2)?,
+                model: row.get(3)?,
+                mode: row.get(4)?,
+                language_codes: serde_json::from_str(&lang_str).unwrap_or_default(),
+                vocabulary_profile_ids: serde_json::from_str(&vocab_str).unwrap_or_default(),
+                transcript_text: row.get(7)?,
+                latency_ms: row.get::<_, i64>(8)? as u64,
+                created_at: row.get(9)?,
+                remote_etag: row.get(10)?,
+                synced_at: row.get(11)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(tries)
+}
+
+pub fn list_post_process_tries(
+    db: &Db,
+    recording_id: &str,
+    transcription_try_id: i64,
+) -> Result<Vec<PostProcessTryRow>> {
+    let conn = db.lock();
+    let mut p_stmt = conn.prepare(
+        "SELECT id, recording_id, transcription_try_id, mode_name, provider, model, thinking_level, prompt_snapshot, output_text, latency_ms, created_at, remote_etag, synced_at
+         FROM post_process_tries
+         WHERE recording_id = ? AND transcription_try_id = ?
+         ORDER BY created_at ASC",
+    )?;
+    let post_tries = p_stmt
+        .query_map(params![recording_id, transcription_try_id], |row| {
+            Ok(PostProcessTryRow {
+                id: row.get(0)?,
+                recording_id: row.get(1)?,
+                transcription_try_id: row.get(2)?,
+                mode_name: row.get(3)?,
+                provider: row.get(4)?,
+                model: row.get(5)?,
+                thinking_level: row.get(6)?,
+                prompt_snapshot: row.get(7)?,
+                output_text: row.get(8)?,
+                latency_ms: row.get::<_, i64>(9)? as u64,
+                created_at: row.get(10)?,
+                remote_etag: row.get(11)?,
+                synced_at: row.get(12)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(post_tries)
+}
+
+pub fn ingest_synced_recording(
+    db: &Db,
+    id: &str,
+    audio_file_path: &str,
+    duration_ms: u64,
+    file_size_bytes: u64,
+    is_pinned: bool,
+    foreground_app: Option<&str>,
+    foreground_app_display: Option<&str>,
+    created_at: i64,
+    deleted_at: Option<i64>,
+    remote_etag: Option<&str>,
+) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let conn = db.lock();
+    conn.execute(
+        "INSERT INTO recordings (
+            id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned,
+            foreground_app, foreground_app_display, remote_etag, synced_at, deleted_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            audio_file_path = excluded.audio_file_path,
+            duration_ms = excluded.duration_ms,
+            file_size_bytes = excluded.file_size_bytes,
+            is_pinned = excluded.is_pinned,
+            foreground_app = excluded.foreground_app,
+            foreground_app_display = excluded.foreground_app_display,
+            remote_etag = excluded.remote_etag,
+            synced_at = excluded.synced_at,
+            deleted_at = excluded.deleted_at",
+        params![
+            id,
+            audio_file_path,
+            duration_ms as i64,
+            file_size_bytes as i64,
+            created_at,
+            if is_pinned { 1 } else { 0 },
+            foreground_app,
+            foreground_app_display,
+            remote_etag,
+            now,
+            deleted_at,
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn delete_recording(db: &Db, recording_id: &str) -> Result<()> {
+    soft_delete_recording(db, recording_id)
+}
+
+pub fn hard_delete_recording(db: &Db, recording_id: &str) -> Result<()> {
     let conn = db.lock();
     let file_path: Option<String> = conn
         .query_row("SELECT audio_file_path FROM recordings WHERE id = ?", [recording_id], |r| r.get(0))
@@ -2672,8 +2895,9 @@ pub fn toggle_recording_pinned(db: &Db, recording_id: &str) -> Result<bool> {
 pub fn list_vocabulary_profiles(db: &Db) -> Result<Vec<VocabularyProfileRow>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(
-        "SELECT id, name, description, terms_json, is_active, created_at
+        "SELECT id, name, description, terms_json, is_active, created_at, updated_at, deleted_at
          FROM vocabulary_profiles
+         WHERE deleted_at IS NULL
          ORDER BY id ASC",
     )?;
     let rows = stmt
@@ -2686,6 +2910,8 @@ pub fn list_vocabulary_profiles(db: &Db) -> Result<Vec<VocabularyProfileRow>> {
                 terms: serde_json::from_str(&terms_json).unwrap_or_default(),
                 is_active: row.get::<_, i64>(4)? != 0,
                 created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+                deleted_at: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2710,40 +2936,48 @@ pub fn save_vocabulary_profile(
     if let Some(id) = id {
         conn.execute(
             "UPDATE vocabulary_profiles
-             SET name = ?, description = ?, terms_json = ?, is_active = ?
+             SET name = ?, description = ?, terms_json = ?, is_active = ?, updated_at = ?
              WHERE id = ?",
-            params![name, description, terms_json, active_int, id],
+            params![name, description, terms_json, active_int, now, id],
         )?;
         Ok(id)
     } else {
         conn.execute(
-            "INSERT INTO vocabulary_profiles (name, description, terms_json, is_active, created_at)
-             VALUES (?, ?, ?, ?, ?)",
-            params![name, description, terms_json, active_int, now],
+            "INSERT INTO vocabulary_profiles (name, description, terms_json, is_active, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![name, description, terms_json, active_int, now, now],
         )?;
         Ok(conn.last_insert_rowid())
     }
 }
 
 pub fn toggle_vocabulary_profile(db: &Db, id: i64) -> Result<bool> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let conn = db.lock();
     let current: i64 = conn
         .query_row("SELECT is_active FROM vocabulary_profiles WHERE id = ?", [id], |r| r.get(0))
         .unwrap_or(1);
     let next = if current == 0 { 1 } else { 0 };
-    conn.execute("UPDATE vocabulary_profiles SET is_active = ? WHERE id = ?", params![next, id])?;
+    conn.execute("UPDATE vocabulary_profiles SET is_active = ?, updated_at = ? WHERE id = ?", params![next, now, id])?;
     Ok(next == 1)
 }
 
 pub fn delete_vocabulary_profile(db: &Db, id: i64) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let conn = db.lock();
-    conn.execute("DELETE FROM vocabulary_profiles WHERE id = ?", [id])?;
+    conn.execute("UPDATE vocabulary_profiles SET deleted_at = ?, updated_at = ? WHERE id = ?", params![now, now, id])?;
     Ok(())
 }
 
 pub fn get_active_vocabulary_terms(db: &Db) -> Result<(Vec<String>, Vec<i64>)> {
     let conn = db.lock();
-    let mut stmt = conn.prepare("SELECT id, terms_json FROM vocabulary_profiles WHERE is_active = 1")?;
+    let mut stmt = conn.prepare("SELECT id, terms_json FROM vocabulary_profiles WHERE is_active = 1 AND deleted_at IS NULL")?;
     let mut all_terms = Vec::new();
     let mut profile_ids = Vec::new();
     let rows = stmt.query_map([], |r| {
@@ -2768,8 +3002,9 @@ pub fn get_active_vocabulary_terms(db: &Db) -> Result<(Vec<String>, Vec<i64>)> {
 pub fn list_context_modes(db: &Db) -> Result<Vec<ContextModeRow>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(
-        "SELECT id, name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, created_at
+        "SELECT id, name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, created_at, updated_at, deleted_at
          FROM context_modes
+         WHERE deleted_at IS NULL
          ORDER BY sort_order ASC, id ASC",
     )?;
     let rows = stmt
@@ -2787,6 +3022,8 @@ pub fn list_context_modes(db: &Db) -> Result<Vec<ContextModeRow>> {
                 hotkey: row.get(9)?,
                 sort_order: row.get(10)?,
                 created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+                deleted_at: row.get(13)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2796,7 +3033,7 @@ pub fn list_context_modes(db: &Db) -> Result<Vec<ContextModeRow>> {
 pub fn get_context_mode(db: &Db, id: i64) -> Result<Option<ContextModeRow>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(
-        "SELECT id, name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, created_at
+        "SELECT id, name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, created_at, updated_at, deleted_at
          FROM context_modes
          WHERE id = ?",
     )?;
@@ -2814,6 +3051,8 @@ pub fn get_context_mode(db: &Db, id: i64) -> Result<Option<ContextModeRow>> {
             hotkey: row.get(9)?,
             sort_order: row.get(10)?,
             created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+            deleted_at: row.get(13)?,
         })
     })?;
     match iter.next() {
@@ -2845,25 +3084,30 @@ pub fn save_context_mode(
     if let Some(id) = id {
         conn.execute(
             "UPDATE context_modes
-             SET name = ?, icon = ?, system_prompt = ?, default_phase1_mode = ?, phase2_enabled = ?, phase2_provider = ?, phase2_model = ?, thinking_level = ?, hotkey = ?, sort_order = ?
+             SET name = ?, icon = ?, system_prompt = ?, default_phase1_mode = ?, phase2_enabled = ?, phase2_provider = ?, phase2_model = ?, thinking_level = ?, hotkey = ?, sort_order = ?, updated_at = ?
              WHERE id = ?",
-            params![name, icon, system_prompt, default_phase1_mode, p2_int, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, id],
+            params![name, icon, system_prompt, default_phase1_mode, p2_int, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, now, id],
         )?;
         Ok(id)
     } else {
         conn.execute(
             "INSERT INTO context_modes
-                (name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![name, icon, system_prompt, default_phase1_mode, p2_int, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, now],
+                (name, icon, system_prompt, default_phase1_mode, phase2_enabled, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![name, icon, system_prompt, default_phase1_mode, p2_int, phase2_provider, phase2_model, thinking_level, hotkey, sort_order, now, now],
         )?;
         Ok(conn.last_insert_rowid())
     }
 }
 
 pub fn delete_context_mode(db: &Db, id: i64) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let conn = db.lock();
-    conn.execute("DELETE FROM context_modes WHERE id = ?", [id])?;
+    conn.execute("UPDATE context_modes SET deleted_at = ?, updated_at = ? WHERE id = ?", params![now, now, id])?;
     Ok(())
 }
+
 

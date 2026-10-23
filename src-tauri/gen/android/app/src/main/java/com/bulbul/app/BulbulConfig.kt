@@ -94,6 +94,14 @@ object BulbulConfig {
     fun onboardingCompleted(context: Context): Boolean =
         read(context)?.optBoolean("onboarding_completed", false) ?: false
 
+    /// Whether the floating bubble overlay is enabled. System Keyboard is the primary interface;
+    /// the floating bubble is an optional toggle (default false / OFF).
+    fun floatingBubbleEnabled(context: Context): Boolean =
+        read(context)?.optBoolean("floating_bubble_enabled", false) ?: false
+
+    fun activeContextModeId(context: Context): Long =
+        read(context)?.optLong("active_context_mode_id", 1L) ?: 1L
+
     /// Opt-in telemetry gate (Settings ▸ Privacy / onboarding toggle).
     /// Defaults true to match the desktop Config default.
     fun telemetryEnabled(context: Context): Boolean =

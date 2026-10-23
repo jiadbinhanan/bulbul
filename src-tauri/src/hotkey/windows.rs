@@ -128,7 +128,10 @@ pub fn spawn_release_poller(
     release_evt: HotkeyEvent,
 ) {
     use ::windows::Win32::UI::Input::KeyboardAndMouse::{
-        VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+        VK_CONTROL, VK_LCONTROL, VK_RCONTROL,
+        VK_LWIN, VK_RWIN,
+        VK_MENU, VK_LMENU, VK_RMENU,
+        VK_SHIFT, VK_LSHIFT, VK_RSHIFT,
     };
     let Some(main_vk) = hotkey.key.as_deref().and_then(key_name_to_vk) else {
         return;
@@ -147,9 +150,18 @@ pub fn spawn_release_poller(
                 return;
             }
             let main_down = is_key_down(main_vk);
-            let ctrl_ok = !hotkey.ctrl || is_key_down(VK_CONTROL.0 as i32);
-            let shift_ok = !hotkey.shift || is_key_down(VK_SHIFT.0 as i32);
-            let alt_ok = !hotkey.alt || is_key_down(VK_MENU.0 as i32);
+            let ctrl_ok = !hotkey.ctrl
+                || is_key_down(VK_CONTROL.0 as i32)
+                || is_key_down(VK_LCONTROL.0 as i32)
+                || is_key_down(VK_RCONTROL.0 as i32);
+            let shift_ok = !hotkey.shift
+                || is_key_down(VK_SHIFT.0 as i32)
+                || is_key_down(VK_LSHIFT.0 as i32)
+                || is_key_down(VK_RSHIFT.0 as i32);
+            let alt_ok = !hotkey.alt
+                || is_key_down(VK_MENU.0 as i32)
+                || is_key_down(VK_LMENU.0 as i32)
+                || is_key_down(VK_RMENU.0 as i32);
             let meta_ok = !hotkey.meta
                 || is_key_down(VK_LWIN.0 as i32)
                 || is_key_down(VK_RWIN.0 as i32);

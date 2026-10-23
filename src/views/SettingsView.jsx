@@ -73,6 +73,7 @@ const LANGUAGES = [
 const CATEGORIES = [
   { id: "general", label: "General" },
   { id: "account", label: "Account" },
+  { id: "cloud", label: "Cloud Sync" },
   { id: "hotkeys", label: "Hotkeys" },
   { id: "personalization", label: "Personalization" },
   { id: "startup", label: "Startup" },
@@ -85,6 +86,7 @@ const CATEGORIES = [
 const M_SECTIONS = [
   { id: "general", label: "General", hint: "Cleanup mode, language, appearance" },
   { id: "account", label: "Account", hint: "Your Groq and Gemini API keys" },
+  { id: "cloud", label: "Cloud Sync", hint: "WebDAV backup, storage quota & 1-click recovery" },
   { id: "overlay", label: "Overlay", hint: "Dictation bubble opacity and size" },
   { id: "personalization", label: "Personalization", hint: "Your name and cleanup preferences" },
   { id: "privacy", label: "Privacy", hint: "Anonymous usage stats" },
@@ -370,6 +372,8 @@ export default function SettingsView({
               setGeminiKeyState={setGeminiKeyState}
             />
           );
+        case "cloud":
+          return <PaneCloudSync config={config} updateConfig={updateConfig} />;
         case "overlay":
           return <PaneOverlay config={config} updateConfig={updateConfig} />;
         case "personalization":
@@ -493,6 +497,9 @@ export default function SettingsView({
                 geminiKeyError={geminiKeyError}
                 setGeminiKeyState={setGeminiKeyState}
               />
+            )}
+            {active === "cloud" && (
+              <PaneCloudSync config={config} updateConfig={updateConfig} />
             )}
             {active === "hotkeys" && (
               <PaneHotkeys
@@ -710,6 +717,385 @@ function PaneAccount({
   );
 }
 
+function PaneCloudSync({ config, updateConfig }) {
+  const [url, setUrl] = useState(config.webdav_url || "");
+  const [username, setUsername] = useState(config.webdav_username || "");
+  const [password, setPassword] = useState(config.webdav_password || "");
+  const [remoteDir, setRemoteDir] = useState(config.webdav_remote_dir || "/DictationApp");
+  const [showPassword, setShowPassword] = useState(false);
+
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [testError, setTestError] = useState("");
+
+  const [syncing, setSyncing] = useState(false);
+  const [syncResult, setSyncResult] = useState(null);
+  const [syncError, setSyncError] = useState("");
+
+  const [restoring, setRestoring] = useState(false);
+  const [restoreResult, setRestoreResult] = useState(null);
+  const [restoreError, setRestoreError] = useState("");
+
+  const [quota, setQuota] = useState(null);
+
+  const [pruning, setPruning] = useState(false);
+  const [pruneResult, setPruneResult] = useState(null);
+  const [pruneError, setPruneError] = useState("");
+
+  const handlePruneUnpinned = async () => {
+    if (!window.confirm("Delete unpinned audio files (.opus) from your WebDAV cloud? Transcripts and pinned audio will be preserved.")) {
+      return;
+    }
+    setPruning(true);
+    setPruneResult(null);
+    setPruneError("");
+    try {
+      const count = await invoke("prune_unpinned_cloud_audio");
+      setPruneResult(`Pruned ${count} unpinned audio file(s) from cloud.`);
+      const res = await invoke("get_webdav_sync_status");
+      if (res?.quota) setQuota(res.quota);
+    } catch (err) {
+      setPruneError(typeof err === "string" ? err : err.message || "Prune failed");
+    } finally {
+      setPruning(false);
+    }
+  };
+
+  useEffect(() => {
+    if (config.webdav_enabled) {
+      invoke("get_webdav_sync_status")
+        .then((res) => {
+          if (res.quota) setQuota(res.quota);
+        })
+        .catch(() => {});
+    }
+  }, [config.webdav_enabled]);
+
+  const handleSaveConnection = (enabled) => {
+    updateConfig({
+      ...config,
+      webdav_enabled: enabled !== undefined ? enabled : config.webdav_enabled,
+      webdav_url: url.trim(),
+      webdav_username: username.trim(),
+      webdav_password: password,
+      webdav_remote_dir: remoteDir.trim() || "/DictationApp",
+    });
+  };
+
+  const handleTestConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    setTestError("");
+    try {
+      const q = await invoke("test_webdav_connection", {
+        url: url.trim(),
+        username: username.trim(),
+        password,
+        remoteDir: remoteDir.trim() || "/DictationApp",
+      });
+      setTestResult("Connected successfully! Storage quota retrieved.");
+      setQuota(q);
+      handleSaveConnection(true);
+    } catch (err) {
+      setTestError(typeof err === "string" ? err : err.message || "Failed to connect to WebDAV server");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handleSyncNow = async () => {
+    setSyncing(true);
+    setSyncResult(null);
+    setSyncError("");
+    try {
+      const res = await invoke("sync_webdav_now");
+      setSyncResult(res.message);
+      if (res.quota) setQuota(res.quota);
+    } catch (err) {
+      setSyncError(typeof err === "string" ? err : err.message || "Sync failed");
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleRestoreBackup = async () => {
+    if (!url.trim() || !username.trim() || !password) {
+      setRestoreError("Please enter Server URL, Username, and App Password first.");
+      return;
+    }
+    setRestoring(true);
+    setRestoreResult(null);
+    setRestoreError("");
+    try {
+      const backup = await invoke("restore_webdav_backup", {
+        url: url.trim(),
+        username: username.trim(),
+        password,
+        remoteDir: remoteDir.trim() || "/DictationApp",
+      });
+      setRestoreResult(
+        `Restored successfully! Recovered API keys, ${backup.vocabulary_profiles?.length || 0} vocabulary profiles, and ${backup.context_modes?.length || 0} context modes.`
+      );
+      setTimeout(() => {
+        window.location.reload();
+      }, 1500);
+    } catch (err) {
+      setRestoreError(typeof err === "string" ? err : err.message || "Restore failed. Verify password and server URL.");
+    } finally {
+      setRestoring(false);
+    }
+  };
+
+  const formatBytes = (bytes) => {
+    if (!bytes || bytes === 0) return "0 MB";
+    const gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1) return `${gb.toFixed(2)} GB`;
+    const mb = bytes / (1024 * 1024);
+    return `${mb.toFixed(1)} MB`;
+  };
+
+  const quotaPercent = quota && quota.total_bytes > 0
+    ? Math.min(100, Math.round((quota.used_bytes / quota.total_bytes) * 100))
+    : 0;
+
+  const presets = [
+    { name: "Koofr (Free 10GB)", url: "https://app.koofr.net/dav/Koofr" },
+    { name: "pCloud", url: "https://webdav.pcloud.com" },
+    { name: "Nextcloud", url: "https://<your-domain>/remote.php/dav/files/<user>/" },
+  ];
+
+  return (
+    <>
+      <ToggleRow
+        title="WebDAV Cloud Sync"
+        hint="Sync dictation history, custom vocabulary, and context modes end-to-end encrypted with your WebDAV account."
+        checked={config.webdav_enabled}
+        onChange={(checked) => {
+          handleSaveConnection(checked);
+        }}
+      />
+
+      <Row
+        title="Server presets"
+        hint="Click to quick-fill your provider's WebDAV endpoint."
+        stack
+      >
+        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "4px" }}>
+          {presets.map((p) => (
+            <button
+              key={p.name}
+              type="button"
+              className="chip"
+              onClick={() => {
+                setUrl(p.url);
+                handleSaveConnection();
+              }}
+            >
+              {p.name}
+            </button>
+          ))}
+        </div>
+      </Row>
+
+      <Row
+        title="WebDAV server URL"
+        hint="Root URL of your WebDAV service."
+        stack
+      >
+        <div className="settings-key-row">
+          <input
+            type="text"
+            value={url}
+            placeholder="https://app.koofr.net/dav/Koofr"
+            onChange={(e) => setUrl(e.target.value)}
+            onBlur={() => handleSaveConnection()}
+            spellCheck={false}
+          />
+        </div>
+      </Row>
+
+      <Row
+        title="Username / Email"
+        hint="Your account username or login email."
+        stack
+      >
+        <div className="settings-key-row">
+          <input
+            type="text"
+            value={username}
+            placeholder="user@example.com"
+            onChange={(e) => setUsername(e.target.value)}
+            onBlur={() => handleSaveConnection()}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </div>
+      </Row>
+
+      <Row
+        title="WebDAV App Password"
+        hint="Generate an App Password in your cloud settings (do NOT use your master account password). This password is also used to derive your AES-256 encryption key."
+        stack
+      >
+        <div className="settings-key-row">
+          <input
+            type={showPassword ? "text" : "password"}
+            value={password}
+            placeholder="••••••••••••••••"
+            onChange={(e) => setPassword(e.target.value)}
+            onBlur={() => handleSaveConnection()}
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            onClick={() => setShowPassword(!showPassword)}
+            title={showPassword ? "Hide password" : "Show password"}
+          >
+            {showPassword ? "Hide" : "Show"}
+          </button>
+        </div>
+      </Row>
+
+      <Row
+        title="Remote directory"
+        hint="Folder path on your WebDAV server where Bulbul stores data (default: /DictationApp)."
+        stack
+      >
+        <div className="settings-key-row">
+          <input
+            type="text"
+            value={remoteDir}
+            placeholder="/DictationApp"
+            onChange={(e) => setRemoteDir(e.target.value)}
+            onBlur={() => handleSaveConnection()}
+            spellCheck={false}
+          />
+        </div>
+      </Row>
+
+      <ToggleRow
+        title="Sync audio recordings (.opus)"
+        hint="Synchronize compressed Ogg Opus audio (~85% smaller) across your devices. Disable to sync text transcripts only."
+        checked={config.webdav_sync_audio !== false}
+        onChange={(checked) => {
+          updateConfig({ ...config, webdav_sync_audio: checked });
+        }}
+      />
+
+      <ToggleRow
+        title="Automatic background sync"
+        hint="Automatically synchronize new recordings after each dictation and when idle."
+        checked={config.webdav_auto_sync !== false}
+        onChange={(checked) => {
+          updateConfig({ ...config, webdav_auto_sync: checked });
+        }}
+      />
+
+      {quota && (
+        <Row
+          title="Cloud storage quota"
+          hint={`RFC 4331 Quota: ${formatBytes(quota.used_bytes)} used of ${formatBytes(quota.total_bytes)} (${quotaPercent}%)`}
+          stack
+        >
+          <div style={{ marginTop: "6px" }}>
+            <div
+              style={{
+                width: "100%",
+                height: "8px",
+                borderRadius: "4px",
+                background: "var(--border, rgba(0,0,0,0.1))",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${quotaPercent}%`,
+                  height: "100%",
+                  background: quotaPercent > 90 ? "var(--err, #e53e3e)" : "var(--primary, #3182ce)",
+                  transition: "width 0.3s ease",
+                }}
+              />
+            </div>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: "12px",
+                marginTop: "4px",
+                color: "var(--muted)",
+              }}
+            >
+              <span>Used: {formatBytes(quota.used_bytes)}</span>
+              <span>Available: {formatBytes(quota.available_bytes)}</span>
+            </div>
+          </div>
+        </Row>
+      )}
+
+      <Row title="Actions" hint="Test your connection or trigger an immediate sync." stack>
+        <div style={{ display: "flex", gap: "10px", marginTop: "4px" }}>
+          <button
+            type="button"
+            disabled={testing || !url.trim() || !username.trim() || !password}
+            onClick={handleTestConnection}
+          >
+            {testing ? "Testing…" : "Test Connection"}
+          </button>
+          <button
+            type="button"
+            className="primary"
+            disabled={syncing || !config.webdav_enabled}
+            onClick={handleSyncNow}
+          >
+            {syncing ? "Syncing…" : "Sync Now"}
+          </button>
+        </div>
+        {testResult && <p className="ok small" style={{ marginTop: "6px" }}>{testResult}</p>}
+        {testError && <p className="err small" style={{ marginTop: "6px" }}>{testError}</p>}
+        {syncResult && <p className="ok small" style={{ marginTop: "6px" }}>{syncResult}</p>}
+        {syncError && <p className="err small" style={{ marginTop: "6px" }}>{syncError}</p>}
+      </Row>
+
+      <Row
+        title="1-Click New Device Recovery"
+        hint="Setting up Bulbul on a new computer or phone? Fill in your WebDAV credentials above and click 'Connect & Restore'. Bulbul will decrypt credentials.json.enc, restoring your API keys, custom vocabulary, and context modes instantly, then fetch your history."
+        stack
+      >
+        <div style={{ marginTop: "6px" }}>
+          <button
+            type="button"
+            disabled={restoring || !url.trim() || !username.trim() || !password}
+            onClick={handleRestoreBackup}
+          >
+            {restoring ? "Restoring…" : "Connect & Restore"}
+          </button>
+          {restoreResult && <p className="ok small" style={{ marginTop: "6px" }}>{restoreResult}</p>}
+          {restoreError && <p className="err small" style={{ marginTop: "6px" }}>{restoreError}</p>}
+        </div>
+      </Row>
+
+      <Row
+        title="Delete unpinned cloud audio"
+        hint="Free up cloud storage by removing audio files (.opus) for unpinned recordings from WebDAV. All text transcripts and pinned audio files remain intact."
+        stack
+      >
+        <div style={{ marginTop: "6px" }}>
+          <button
+            type="button"
+            disabled={pruning || !config.webdav_enabled}
+            onClick={handlePruneUnpinned}
+          >
+            {pruning ? "Pruning…" : "Delete Unpinned Cloud Audio"}
+          </button>
+          {pruneResult && <p className="ok small" style={{ marginTop: "6px" }}>{pruneResult}</p>}
+          {pruneError && <p className="err small" style={{ marginTop: "6px" }}>{pruneError}</p>}
+        </div>
+      </Row>
+    </>
+  );
+}
+
 function PaneHotkeys({
   config,
   updateConfig,
@@ -856,6 +1242,12 @@ function PaneOverlay({ config, updateConfig }) {
 
   return (
     <>
+      <ToggleRow
+        title="Floating bubble overlay"
+        hint="The voice-first System Keyboard is Bulbul's primary interface on Android. Enable this if you also want an on-screen floating bubble."
+        checked={config.floating_bubble_enabled ?? false}
+        onChange={(v) => updateConfig({ ...config, floating_bubble_enabled: v })}
+      />
       <Row
         title="Bubble opacity"
         hint="How see-through the floating dictation bubble is."

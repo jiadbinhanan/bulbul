@@ -7,6 +7,8 @@ mod correction;
 mod db;
 mod gemini;
 mod groq;
+pub mod opus_encoder;
+pub mod webdav;
 mod hotkey;
 mod inject;
 #[cfg(target_os = "windows")]
@@ -2658,7 +2660,7 @@ fn count_recordings_v2(app: AppHandle) -> Result<u64, String> {
     let db = &app.state::<AppState>().db;
     let conn = db.lock();
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM recordings", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM recordings WHERE deleted_at IS NULL", [], |r| r.get(0))
         .unwrap_or(0);
     Ok(count as u64)
 }
@@ -2688,6 +2690,16 @@ fn toggle_recording_pinned(
 ) -> Result<bool, String> {
     let db = &app.state::<AppState>().db;
     db::toggle_recording_pinned(db, &id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+fn open_keyboard_settings() -> Result<(), String> {
+    Ok(())
+}
+
+#[tauri::command]
+fn show_keyboard_picker() -> Result<(), String> {
+    Ok(())
 }
 
 #[tauri::command]
@@ -2806,10 +2818,43 @@ async fn get_recording_audio_bytes(
     recording_id: String,
 ) -> Result<String, String> {
     let dir = config::recordings_dir().map_err(|e| format!("{e:#}"))?;
-    let path = dir.join(format!("{recording_id}.wav"));
-    let bytes = std::fs::read(&path).map_err(|e| format!("reading audio file: {e:#}"))?;
-    let b64 = BASE64.encode(&bytes);
-    Ok(format!("data:audio/wav;base64,{b64}"))
+    let opus_path = dir.join(format!("{recording_id}.opus"));
+    if opus_path.exists() {
+        let bytes = std::fs::read(&opus_path).map_err(|e| format!("reading opus audio file: {e:#}"))?;
+        let b64 = BASE64.encode(&bytes);
+        return Ok(format!("data:audio/ogg;base64,{b64}"));
+    }
+    let wav_path = dir.join(format!("{recording_id}.wav"));
+    if wav_path.exists() {
+        let bytes = std::fs::read(&wav_path).map_err(|e| format!("reading wav audio file: {e:#}"))?;
+        let b64 = BASE64.encode(&bytes);
+        return Ok(format!("data:audio/wav;base64,{b64}"));
+    }
+
+    // On-demand fetch from WebDAV cloud if enabled
+    let cfg = config::load();
+    if cfg.webdav_enabled {
+        if let Ok(client) = webdav::WebdavClient::from_config(&cfg) {
+            let remote_audio = format!("audio/{recording_id}.opus");
+            if let Ok(bytes) = client.get_file(&remote_audio).await {
+                let _ = std::fs::write(&opus_path, &bytes);
+                let b64 = BASE64.encode(&bytes);
+                return Ok(format!("data:audio/ogg;base64,{b64}"));
+            }
+        }
+    }
+
+    Err("Audio file not found".to_string())
+}
+
+#[tauri::command]
+async fn prune_unpinned_cloud_audio(
+    app: AppHandle,
+) -> Result<u32, String> {
+    let state = app.state::<AppState>();
+    let cfg = state.config.lock().clone();
+    let db = state.db.clone();
+    webdav::prune_unpinned_cloud_audio(&db, &cfg).await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -2826,8 +2871,24 @@ async fn rerun_transcription(
     let db = state.db.clone();
 
     let dir = config::recordings_dir().map_err(|e| format!("{e:#}"))?;
-    let path = dir.join(format!("{recording_id}.wav"));
-    let wav = std::fs::read(&path).map_err(|e| format!("reading audio file: {e:#}"))?;
+    let opus_path = dir.join(format!("{recording_id}.opus"));
+    let wav_path = dir.join(format!("{recording_id}.wav"));
+    let audio_bytes = if opus_path.exists() {
+        std::fs::read(&opus_path).map_err(|e| format!("reading opus audio: {e:#}"))?
+    } else if wav_path.exists() {
+        std::fs::read(&wav_path).map_err(|e| format!("reading wav audio: {e:#}"))?
+    } else {
+        // On-demand fetch from WebDAV cloud if enabled
+        if cfg.webdav_enabled {
+            let client = webdav::WebdavClient::from_config(&cfg).map_err(|e| format!("{e:#}"))?;
+            let remote_audio = format!("audio/{recording_id}.opus");
+            let bytes = client.get_file(&remote_audio).await.map_err(|e| format!("downloading audio from cloud: {e:#}"))?;
+            let _ = std::fs::write(&opus_path, &bytes);
+            bytes
+        } else {
+            return Err("Audio file not found".to_string());
+        }
+    };
 
     let vocab = custom_vocabulary.unwrap_or_default();
     let is_coding = mode.to_lowercase().contains("tech") || mode.to_lowercase().contains("code");
@@ -2837,7 +2898,7 @@ async fn rerun_transcription(
         if model == "gemini-auto-fallback" || model.trim().is_empty() {
             gemini::transcribe_with_fallback(
                 &cfg,
-                &wav,
+                &audio_bytes,
                 &vocab,
                 is_coding,
                 Some(&mode),
@@ -2850,7 +2911,7 @@ async fn rerun_transcription(
             let text = gemini::transcribe_model(
                 &cfg,
                 &model,
-                &wav,
+                &audio_bytes,
                 &vocab,
                 is_coding,
                 Some(&mode),
@@ -2860,7 +2921,7 @@ async fn rerun_transcription(
             (text, model.clone())
         }
     } else {
-        let text = groq::transcribe(&cfg, wav, &vocab, None)
+        let text = groq::transcribe(&cfg, audio_bytes, &vocab, None)
             .await
             .map_err(|e| format!("{e:#}"))?;
         (text, model.clone())
@@ -2895,13 +2956,15 @@ async fn rerun_transcription(
         id: try_id,
         recording_id,
         provider,
-        model,
+        model: final_model,
         mode,
         language_codes,
         vocabulary_profile_ids: vec![],
         transcript_text: transcript,
         latency_ms,
         created_at: now,
+        remote_etag: None,
+        synced_at: None,
     })
 }
 
@@ -2984,7 +3047,125 @@ async fn rerun_post_process(
         output_text: output,
         latency_ms,
         created_at: now,
+        remote_etag: None,
+        synced_at: None,
     })
+}
+
+#[tauri::command]
+async fn test_webdav_connection(
+    url: String,
+    username: String,
+    password: String,
+    remote_dir: Option<String>,
+) -> Result<webdav::WebdavQuota, String> {
+    let dummy_cfg = Config {
+        webdav_enabled: true,
+        webdav_url: url,
+        webdav_username: username,
+        webdav_password: password,
+        webdav_remote_dir: remote_dir.unwrap_or_else(|| "/DictationApp".to_string()),
+        ..Default::default()
+    };
+    let client = webdav::WebdavClient::from_config(&dummy_cfg).map_err(|e| format!("{e:#}"))?;
+    client.test_connection().await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn sync_webdav_now(
+    app: AppHandle,
+) -> Result<webdav::SyncStatusResult, String> {
+    let state = app.state::<AppState>();
+    let cfg = state.config.lock().clone();
+    let db = state.db.clone();
+    let dir = config::recordings_dir().map_err(|e| format!("{e:#}"))?;
+    
+    let res = webdav::run_sync(&db, &cfg, &dir).await.map_err(|e| format!("{e:#}"))?;
+    
+    if let Some(ts) = res.last_sync_at {
+        let mut c = state.config.lock();
+        c.webdav_last_sync_at = Some(ts);
+        let _ = config::save(&c);
+    }
+    
+    Ok(res)
+}
+
+#[tauri::command]
+async fn restore_webdav_backup(
+    app: AppHandle,
+    url: String,
+    username: String,
+    password: String,
+    remote_dir: Option<String>,
+) -> Result<webdav::CredentialsBackup, String> {
+    let state = app.state::<AppState>();
+    let mut cfg = state.config.lock().clone();
+    cfg.webdav_enabled = true;
+    cfg.webdav_url = url;
+    cfg.webdav_username = username;
+    cfg.webdav_password = password;
+    cfg.webdav_remote_dir = remote_dir.unwrap_or_else(|| "/DictationApp".to_string());
+    
+    let client = webdav::WebdavClient::from_config(&cfg).map_err(|e| format!("{e:#}"))?;
+    let backup = client.restore_credentials(&state.db, &mut cfg).await.map_err(|e| format!("{e:#}"))?;
+    
+    {
+        let mut lock = state.config.lock();
+        *lock = cfg.clone();
+        config::save(&lock).map_err(|e| format!("{e:#}"))?;
+    }
+    
+    // Trigger initial sync to pull down records
+    if let Ok(dir) = config::recordings_dir() {
+        let _ = webdav::run_sync(&state.db, &cfg, &dir).await;
+    }
+    
+    Ok(backup)
+}
+
+#[tauri::command]
+async fn get_webdav_sync_status(
+    app: AppHandle,
+) -> Result<webdav::SyncStatusResult, String> {
+    let state = app.state::<AppState>();
+    let cfg = state.config.lock().clone();
+    if !cfg.webdav_enabled {
+        return Ok(webdav::SyncStatusResult {
+            connected: false,
+            last_sync_at: cfg.webdav_last_sync_at,
+            quota: None,
+            total_records_synced: 0,
+            message: "WebDAV sync is disabled".to_string(),
+        });
+    }
+    let client = match webdav::WebdavClient::from_config(&cfg) {
+        Ok(c) => c,
+        Err(e) => return Ok(webdav::SyncStatusResult {
+            connected: false,
+            last_sync_at: cfg.webdav_last_sync_at,
+            quota: None,
+            total_records_synced: 0,
+            message: format!("WebDAV configuration error: {e:#}"),
+        }),
+    };
+    
+    match client.get_quota().await {
+        Ok(q) => Ok(webdav::SyncStatusResult {
+            connected: true,
+            last_sync_at: cfg.webdav_last_sync_at,
+            quota: Some(q),
+            total_records_synced: 0,
+            message: "Connected to WebDAV".to_string(),
+        }),
+        Err(e) => Ok(webdav::SyncStatusResult {
+            connected: false,
+            last_sync_at: cfg.webdav_last_sync_at,
+            quota: None,
+            total_records_synced: 0,
+            message: format!("Connection failed: {e:#}"),
+        }),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3157,6 +3338,8 @@ pub fn run() {
             get_full_recording_v2,
             delete_recording_v2,
             toggle_recording_pinned,
+            open_keyboard_settings,
+            show_keyboard_picker,
             list_vocabulary_profiles,
             save_vocabulary_profile,
             toggle_vocabulary_profile,
@@ -3169,6 +3352,11 @@ pub fn run() {
             get_recording_audio_bytes,
             rerun_transcription,
             rerun_post_process,
+            test_webdav_connection,
+            sync_webdav_now,
+            restore_webdav_backup,
+            get_webdav_sync_status,
+            prune_unpinned_cloud_audio,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -3848,11 +4036,12 @@ fn spawn_orchestrator(handle: AppHandle, rx: std::sync::mpsc::Receiver<HotkeyEve
                     // polish hotkey forces Polished even if the user's
                     // global mode is Raw or Clean.
                     cfg.mode = meta.mode.clone();
-                    if captured < cfg.min_recording_seconds {
+                    let min_secs = cfg.min_recording_seconds.min(0.25);
+                    if captured < min_secs {
                         tracing::info!(
                             "discarding {:.2}s clip (min {:.2}s)",
                             captured,
-                            cfg.min_recording_seconds
+                            min_secs
                         );
                         emit_status(&handle, "idle", Some("Too short, ignored.".into()));
                         continue;
@@ -3870,30 +4059,8 @@ fn spawn_orchestrator(handle: AppHandle, rx: std::sync::mpsc::Receiver<HotkeyEve
                     // Whisper — otherwise it hallucinates "thank you" / "you" /
                     // "thanks for watching" / Hindi-equivalent phrases that
                     // can slip past the post-STT denylist.
-                    //
-                    // We look at TWO numbers:
-                    //   1. peak across the whole clip — a safety floor so a
-                    //      completely silent capture (mic muted, wrong input
-                    //      device) can't get through on a fluke.
-                    //   2. RMS of the loudest 30 ms window — the actual
-                    //      "is there speech in here?" signal. Clip-wide RMS
-                    //      used to live here, but it punished slow speakers
-                    //      and distant talkers: a 4 s clip with 1 s of
-                    //      leading silence + 3 s of quiet speech has its
-                    //      average dragged 6+ dB below the real speech
-                    //      level, so even clearly audible voice got
-                    //      rejected. The per-window max ignores dead air
-                    //      and tracks the loudest actual moment.
-                    //
-                    // Thresholds:
-                    //   peak ≥ -55 dBFS — anything quieter is genuinely empty.
-                    //   max_window_rms ≥ -50 dBFS — covers normal speech
-                    //     (~-25), soft speech (~-35), and far-field /
-                    //     across-the-room speech (~-45 to -48). AGC
-                    //     downstream still amplifies whisper-level audio
-                    //     up to +30 dB before it reaches Whisper.
-                    const SILENCE_PEAK_DBFS: f32 = -55.0;
-                    const SILENCE_WINDOW_RMS_DBFS: f32 = -50.0;
+                    const SILENCE_PEAK_DBFS: f32 = -60.0;
+                    const SILENCE_WINDOW_RMS_DBFS: f32 = -54.0;
                     if result.peak_dbfs < SILENCE_PEAK_DBFS
                         || result.max_window_rms_dbfs < SILENCE_WINDOW_RMS_DBFS
                     {
@@ -3915,8 +4082,9 @@ fn spawn_orchestrator(handle: AppHandle, rx: std::sync::mpsc::Receiver<HotkeyEve
                     emit_status(&handle, "processing", None);
                     let handle_for_task = handle.clone();
                     let wav = result.wav;
+                    let opus = result.opus;
                     tauri::async_runtime::spawn(async move {
-                        process_pipeline(handle_for_task, cfg, wav, meta, duration_ms).await;
+                        process_pipeline(handle_for_task, cfg, wav, opus, meta, duration_ms).await;
                     });
                 }
                 HotkeyEvent::TransformTriggered(transform_id) => {
@@ -4290,19 +4458,25 @@ async fn process_pipeline(
     app: AppHandle,
     cfg: Config,
     wav: Vec<u8>,
+    opus: Vec<u8>,
     meta: PendingDictation,
     duration_ms: u64,
 ) {
     let t_pipeline_start = Instant::now();
-    let audio_bytes = wav.len();
+    let primary_audio = if !opus.is_empty() { &opus } else { &wav };
+    let audio_bytes = primary_audio.len();
     let db = app.state::<AppState>().db.clone();
 
-    // Persist audio WAV file to disk: {recordings_dir}/{recording_id}.wav
+    // Persist audio file to disk: {recordings_dir}/{recording_id}.opus (or .wav fallback)
     let recording_id = uuid::Uuid::new_v4().to_string();
-    let audio_file_name = format!("{recording_id}.wav");
+    let audio_file_name = if !opus.is_empty() {
+        format!("{recording_id}.opus")
+    } else {
+        format!("{recording_id}.wav")
+    };
     if let Ok(dir) = config::recordings_dir() {
         let p = dir.join(&audio_file_name);
-        if let Err(e) = std::fs::write(&p, &wav) {
+        if let Err(e) = std::fs::write(&p, primary_audio) {
             tracing::error!("failed to write recording to disk: {e:#}");
         }
     }
@@ -4373,7 +4547,7 @@ async fn process_pipeline(
 
         match gemini::transcribe_with_fallback(
             &cfg,
-            &wav,
+            primary_audio,
             &vocabulary,
             is_coding,
             Some(phase1_mode),
@@ -4393,7 +4567,7 @@ async fn process_pipeline(
             }
         }
     } else {
-        match groq::transcribe(&cfg, wav.clone(), &vocabulary, Some(notify_rl)).await {
+        match groq::transcribe(&cfg, primary_audio.to_vec(), &vocabulary, Some(notify_rl)).await {
             Ok(t) => t,
             Err(e) => {
                 tracing::error!("STT failed: {e:#}");
@@ -4782,6 +4956,25 @@ async fn process_pipeline(
     }
 
     emit_status(&app, "done", Some(final_text));
+
+    // If WebDAV auto-sync is enabled, trigger background sync
+    if cfg.webdav_enabled && cfg.webdav_auto_sync {
+        let sync_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = sync_app.state::<AppState>();
+            let cfg = state.config.lock().clone();
+            let db = state.db.clone();
+            if let Ok(dir) = config::recordings_dir() {
+                if let Ok(res) = webdav::run_sync(&db, &cfg, &dir).await {
+                    if let Some(ts) = res.last_sync_at {
+                        let mut c = state.config.lock();
+                        c.webdav_last_sync_at = Some(ts);
+                        let _ = config::save(&c);
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Fire a telemetry event for a failed dictation. Caller still emits the

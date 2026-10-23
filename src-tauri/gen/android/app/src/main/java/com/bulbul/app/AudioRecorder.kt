@@ -128,6 +128,13 @@ class AudioRecorder(private val context: Context) {
     /// 44-byte WAV header (PCM, 16 kHz mono, 16-bit). Returns null if
     /// nothing was captured.
     fun stop(): ByteArray? {
+        val pcm = stopRawPcm() ?: return null
+        return wrapAsWav(pcm)
+    }
+
+    /// Stops the recorder and returns the captured 16kHz 16-bit mono PCM audio
+    /// normalized for direct passing to the Rust audio / Opus encoder pipeline.
+    fun stopRawPcm(): ByteArray? {
         if (!recording && record == null) return null
         recording = false
         try {
@@ -150,7 +157,7 @@ class AudioRecorder(private val context: Context) {
             return null
         }
         Log.i(TAG, "recording stopped, captured ${pcmBytes.size} PCM bytes")
-        return wrapAsWav(normalize(pcmBytes))
+        return normalize(pcmBytes)
     }
 
     /// Ask the platform to clean the capture the way Windows' mic

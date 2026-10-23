@@ -136,11 +136,7 @@ const SAMPLE_LINE = "Hi Bulbul, um, this is, uh, my first test, and like, it loo
 // even though only the very first run ever touches native code at all.
 function androidStepSequence(config) {
   if (!IS_ANDROID) return null;
-  const isReplay = !!config.onboarding_ever_completed;
-  const recap = isReplay
-    ? ["heroRecap", "micRecap", "overlayRecap", "accessibilityRecap"]
-    : [];
-  return [...recap, "name", "apiKey", "language", "overlayAdjuster", "dictateTest", "done"];
+  return ["welcome", "apiKey", "language", "keyboard", "done"];
 }
 
 export default function OnboardingWizard({ config, updateConfig, onComplete, recovery = false, onRecovered }) {
@@ -152,14 +148,9 @@ export default function OnboardingWizard({ config, updateConfig, onComplete, rec
       ? ["welcome", "permissions", "apiKey", "language", "hotkey", "mouseMode", "done"]
       : ["welcome", "apiKey", "language", "hotkey", "mouseMode", "done"]);
 
-  // A first run shows 4 screens natively before this wizard ever mounts,
-  // so its progress bar continues that same 10-screen count rather than
-  // restarting at "1 of 6" (must match TOTAL_ONBOARDING_STEPS in
-  // SetupActivity.kt). A replay shows all 10 screens itself — including
-  // its own recap of the native four — so it needs no offset at all.
-  const isAndroidReplay = IS_ANDROID && !!config.onboarding_ever_completed;
-  const GLOBAL_STEP_OFFSET = IS_ANDROID && !isAndroidReplay ? 4 : 0;
-  const GLOBAL_TOTAL_STEPS = IS_ANDROID ? 10 : null;
+  // Mobile and desktop both use standard 1..N progress steps without native offset
+  const GLOBAL_STEP_OFFSET = 0;
+  const GLOBAL_TOTAL_STEPS = null;
 
   const [step, setStep] = useState(0);
   const totalSteps = GLOBAL_TOTAL_STEPS ?? STEP_SEQUENCE.length;
@@ -337,6 +328,11 @@ export default function OnboardingWizard({ config, updateConfig, onComplete, rec
             config={config}
             updateConfig={updateConfig}
             onNext={goNext}
+            onSkipToKeyboard={() => {
+              const kIdx = STEP_SEQUENCE.indexOf("keyboard");
+              if (kIdx !== -1) setStep(kIdx);
+              else goNext();
+            }}
           />
         )}
         {currentStepName === "permissions" && (
@@ -399,6 +395,9 @@ export default function OnboardingWizard({ config, updateConfig, onComplete, rec
             onNext={goNext}
           />
         )}
+        {currentStepName === "keyboard" && (
+          <StepKeyboard onBack={goBack} onNext={goNext} />
+        )}
         {currentStepName === "hotkey" && (
           <StepHotkey
             config={config}
@@ -439,11 +438,61 @@ export default function OnboardingWizard({ config, updateConfig, onComplete, rec
   );
 }
 
-function StepWelcome({ config, updateConfig, onNext }) {
-  // Local draft so typing doesn't write to disk per keystroke. Commit
-  // on blur or on Continue. Pre-populated when the user has filled
-  // this before and is revisiting the wizard.
+function StepWelcome({ config, updateConfig, onNext, onSkipToKeyboard }) {
+  // Two entry paths: "restore" (Restore from Cloud / Login) or "new" (Set up fresh)
+  const [welcomeMode, setWelcomeMode] = useState("restore");
   const [name, setName] = useState(config?.display_name || "");
+
+  // Cloud restore states
+  const [cloudUrl, setCloudUrl] = useState(config?.webdav_url || "https://dav.jiad.me");
+  const [cloudUsername, setCloudUsername] = useState(config?.webdav_username || "");
+  const [cloudPassword, setCloudPassword] = useState(config?.webdav_password || "");
+  const [cloudRemoteDir, setCloudRemoteDir] = useState(config?.webdav_remote_dir || "/DictationApp");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const [restoring, setRestoring] = useState(false);
+  const [restoreError, setRestoreError] = useState("");
+  const [restoreSuccess, setRestoreSuccess] = useState(false);
+
+  async function handleCloudRestore(e) {
+    e?.preventDefault();
+    if (!cloudUrl.trim() || !cloudUsername.trim() || !cloudPassword) {
+      setRestoreError("Please enter your WebDAV Server URL, Username, and App Password.");
+      return;
+    }
+    setRestoring(true);
+    setRestoreError("");
+    setRestoreSuccess(false);
+    try {
+      const backup = await invoke("restore_webdav_backup", {
+        url: cloudUrl.trim(),
+        username: cloudUsername.trim(),
+        password: cloudPassword,
+        remoteDir: cloudRemoteDir.trim() || "/DictationApp",
+      });
+
+      const updated = {
+        ...config,
+        webdav_enabled: true,
+        webdav_url: cloudUrl.trim(),
+        webdav_username: cloudUsername.trim(),
+        webdav_password: cloudPassword,
+        webdav_remote_dir: cloudRemoteDir.trim() || "/DictationApp",
+      };
+      if (backup?.groq_api_key) updated.groq_api_key = backup.groq_api_key;
+      if (backup?.gemini_api_key) updated.gemini_api_key = backup.gemini_api_key;
+      if (backup?.language) updated.language = backup.language;
+      if (backup?.phase2_mode) updated.phase2_mode = backup.phase2_mode;
+      await updateConfig(updated);
+
+      setRestoreSuccess(true);
+    } catch (err) {
+      setRestoreError(typeof err === "string" ? err : err.message || "Failed to restore cloud backup");
+    } finally {
+      setRestoring(false);
+    }
+  }
 
   function commitAndNext() {
     const trimmed = name.trim();
@@ -456,56 +505,214 @@ function StepWelcome({ config, updateConfig, onNext }) {
   return (
     <div className="onb-page-inner onb-welcome">
       <img src={bulbulMark} alt="" className="onb-hero-mark" aria-hidden />
-      <h1>Welcome to Bulbul.</h1>
+      <h1>Welcome to Bulbul</h1>
       <p className="onb-lead">
         {IS_ANDROID
-          ? "Tap the floating bubble in any app. Speak. Your words appear where your cursor is."
+          ? "Fast, private voice typing directly from your keyboard."
           : "Hold a hotkey anywhere on your computer. Speak. Text appears where your cursor is."}
       </p>
-      <div className="onb-value-grid">
-        <div className="onb-value">
-          <div className="onb-value-title">Your key, your audio</div>
-          <p>Bulbul talks to Groq using your own API key. Nothing is logged on our servers — there are no servers.</p>
-        </div>
-        <div className="onb-value">
-          <div className="onb-value-title">Free and open source</div>
-          <p>Local app, no subscription, no surprises. Yours to fork.</p>
-        </div>
-        <div className="onb-value">
-          <div className="onb-value-title">Two minutes to set up</div>
-          <p>API key, hotkey, done. You'll be dictating before your coffee's cold.</p>
-        </div>
+
+      {/* Choice: Restore / Login vs Start Fresh */}
+      <div className="segmented onb-theme-seg" style={{ margin: "16px auto 20px auto", maxWidth: 420, width: "100%" }}>
+        <button
+          type="button"
+          className={`segmented-btn ${welcomeMode === "restore" ? "selected" : ""}`}
+          onClick={() => { setWelcomeMode("restore"); setRestoreError(""); }}
+        >
+          ⇄ Restore from Cloud
+        </button>
+        <button
+          type="button"
+          className={`segmented-btn ${welcomeMode === "new" ? "selected" : ""}`}
+          onClick={() => { setWelcomeMode("new"); setRestoreError(""); }}
+        >
+          ✦ Set up as New
+        </button>
       </div>
 
-      <div className="onb-name-block">
-        <label htmlFor="onb-name-input" className="onb-name-label">
-          What should I call you? <span className="muted small">(optional, stays on your machine)</span>
-        </label>
-        <input
-          id="onb-name-input"
-          type="text"
-          className="onb-name-input"
-          placeholder="First name"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              commitAndNext();
-            }
-          }}
-          spellCheck={false}
-          autoComplete="off"
-          maxLength={48}
-        />
-        <p className="muted small onb-name-hint">
-          Used to sign your Compose drafts and greet you on the home page. Never sent anywhere — Bulbul keeps it in your local config.
-        </p>
-      </div>
+      {welcomeMode === "restore" ? (
+        <div className="onb-value" style={{ width: "100%", maxWidth: 540, margin: "0 auto", padding: "20px 24px", textAlign: "left" }}>
+          <div className="onb-value-title" style={{ fontSize: 15, marginBottom: 4 }}>
+            Restore API Keys & Preferences from Cloud
+          </div>
+          <p style={{ marginBottom: 14 }}>
+            Enter your Nextcloud / WebDAV credentials to sync your API keys, vocabulary, and context modes in 1 click.
+          </p>
 
-      <div className="onb-actions onb-actions-center">
-        <button className="onb-btn primary" onClick={commitAndNext}>Get started →</button>
-      </div>
+          <form onSubmit={handleCloudRestore} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div>
+              <label className="muted small" style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>
+                WebDAV Server URL
+              </label>
+              <input
+                type="url"
+                className="onb-input"
+                style={{ width: "100%", background: "var(--field)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}
+                placeholder="https://dav.jiad.me"
+                value={cloudUrl}
+                onChange={(e) => setCloudUrl(e.target.value)}
+                required
+              />
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div>
+                <label className="muted small" style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>
+                  Username
+                </label>
+                <input
+                  type="text"
+                  className="onb-input"
+                  style={{ width: "100%", background: "var(--field)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}
+                  placeholder="Username"
+                  value={cloudUsername}
+                  onChange={(e) => setCloudUsername(e.target.value)}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="muted small" style={{ display: "block", marginBottom: 4, fontWeight: 500 }}>
+                  App Password
+                </label>
+                <div style={{ position: "relative", display: "flex" }}>
+                  <input
+                    type={showPassword ? "text" : "password"}
+                    className="onb-input"
+                    style={{ width: "100%", background: "var(--field)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px", paddingRight: 40 }}
+                    placeholder="App password"
+                    value={cloudPassword}
+                    onChange={(e) => setCloudPassword(e.target.value)}
+                    required
+                  />
+                  <button
+                    type="button"
+                    className="onb-key-eye"
+                    style={{ position: "absolute", right: 0, top: 0, bottom: 0 }}
+                    onClick={() => setShowPassword(!showPassword)}
+                    tabIndex={-1}
+                  >
+                    {showPassword ? <EyeOffIcon /> : <EyeIcon />}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <button
+                type="button"
+                className="onb-btn ghost small"
+                style={{ padding: "4px 8px", fontSize: 12, marginTop: 2 }}
+                onClick={() => setShowAdvanced(!showAdvanced)}
+              >
+                {showAdvanced ? "▲ Hide Advanced" : "▼ Advanced (Remote Directory)"}
+              </button>
+              {showAdvanced && (
+                <div style={{ marginTop: 8 }}>
+                  <label className="muted small" style={{ display: "block", marginBottom: 4 }}>
+                    Remote Sync Folder
+                  </label>
+                  <input
+                    type="text"
+                    className="onb-input"
+                    style={{ width: "100%", background: "var(--field)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 12px", fontSize: 13 }}
+                    value={cloudRemoteDir}
+                    onChange={(e) => setCloudRemoteDir(e.target.value)}
+                  />
+                </div>
+              )}
+            </div>
+
+            {restoreError && (
+              <p style={{ color: "var(--red, #e05252)", fontSize: 13, margin: "6px 0 0 0" }}>
+                {restoreError}
+              </p>
+            )}
+
+            {restoreSuccess && (
+              <div style={{ background: "rgba(94, 200, 192, 0.15)", border: "1px solid #5ec8c0", borderRadius: 8, padding: "10px 14px", marginTop: 6, color: "var(--text)" }}>
+                <strong style={{ display: "block", color: "#25857c", marginBottom: 2 }}>✓ Cloud Data Restored!</strong>
+                <span className="muted small">API keys, vocabulary, context modes, and history are ready.</span>
+              </div>
+            )}
+
+            <div style={{ marginTop: 14, display: "flex", justifyContent: "flex-end", gap: 10 }}>
+              {!restoreSuccess ? (
+                <button
+                  type="submit"
+                  className="onb-btn primary"
+                  disabled={restoring || !cloudUrl || !cloudUsername || !cloudPassword}
+                  style={{ width: "100%" }}
+                >
+                  {restoring ? "Connecting & Restoring…" : "Restore from Cloud ⚡"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="onb-btn primary"
+                  onClick={() => {
+                    if (onSkipToKeyboard) onSkipToKeyboard();
+                    else onNext();
+                  }}
+                  style={{ width: "100%" }}
+                >
+                  {IS_ANDROID ? "Continue to Keyboard Setup →" : "Continue →"}
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      ) : (
+        <>
+          <div className="onb-value-grid">
+            <div className="onb-value">
+              <div className="onb-value-title">Your key, your audio</div>
+              <p>Bulbul talks to Groq using your own API key. Nothing is logged on any intermediary servers.</p>
+            </div>
+            <div className="onb-value">
+              <div className="onb-value-title">Free and open source</div>
+              <p>Local app, no subscription, no lock-in. Full privacy by design.</p>
+            </div>
+            <div className="onb-value">
+              <div className="onb-value-title">Instant setup</div>
+              <p>Set your language, keyboard, and you are ready to dictate anywhere.</p>
+            </div>
+          </div>
+
+          <div className="onb-name-block">
+            <label htmlFor="onb-name-input" className="onb-name-label">
+              What should I call you? <span className="muted small">(optional)</span>
+            </label>
+            <input
+              id="onb-name-input"
+              type="text"
+              className="onb-name-input"
+              placeholder="First name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commitAndNext();
+                }
+              }}
+              spellCheck={false}
+              autoComplete="off"
+              maxLength={48}
+            />
+            <p className="muted small onb-name-hint">
+              Used to greet you on the home page. Stays strictly local on your device.
+            </p>
+          </div>
+
+          <div className="onb-actions onb-actions-center">
+            <button className="onb-btn primary" onClick={commitAndNext}>Get started →</button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -852,12 +1059,18 @@ const THEME_OPTIONS = [
 ];
 
 function StepApiKey({ config, updateConfig, onBack, onNext }) {
+  const [hasKey, setHasKey] = useState(
+    Boolean((config.groq_api_key && config.groq_api_key.trim().length > 0) || (config.gemini_api_key && config.gemini_api_key.trim().length > 0))
+  );
   const [keyValue, setKeyValue] = useState(config.groq_api_key || "");
   const [keyState, setKeyState] = useState(
     config.groq_api_key && config.groq_api_key.trim().length > 0 ? "valid" : "idle"
   );
   const [keyError, setKeyError] = useState("");
   const [showKey, setShowKey] = useState(false);
+
+  const [geminiKey, setGeminiKey] = useState(config.gemini_api_key || "");
+  const [showGeminiKey, setShowGeminiKey] = useState(false);
 
   async function validateAndSave(value) {
     const v = (value ?? keyValue).trim();
@@ -871,18 +1084,21 @@ function StepApiKey({ config, updateConfig, onBack, onNext }) {
     try {
       await invoke("validate_api_key", { apiKey: v });
       setKeyState("valid");
-      await updateConfig({ ...config, groq_api_key: v });
+      await updateConfig({ ...config, groq_api_key: v, gemini_api_key: geminiKey.trim() });
     } catch (e) {
       setKeyState("invalid");
       setKeyError(String(e));
     }
   }
 
+  async function saveGeminiDirectly(val) {
+    setGeminiKey(val);
+    await updateConfig({ ...config, gemini_api_key: val.trim() });
+  }
+
   function handlePaste(e) {
     const pasted = e.clipboardData?.getData("text") ?? "";
     if (pasted.trim()) {
-      // The input will receive the paste itself; we just kick off the
-      // verification with the new value rather than waiting for blur.
       setTimeout(() => validateAndSave(pasted.trim()), 0);
     }
   }
@@ -896,141 +1112,150 @@ function StepApiKey({ config, updateConfig, onBack, onNext }) {
   return (
     <div className={`onb-page-inner${IS_ANDROID ? " onb-page-inner-bleed" : ""}`}>
       <div className="onb-step-body">
-      {IS_ANDROID ? (
-        <div className="onb-hero-frame">
-          <img src={onboardGroq} alt="" className="onb-hero-image" aria-hidden />
-          <div className="onb-hero-overlay">
-            <h2>Paste your Groq API key</h2>
-            <p className="onb-sub">
-              Need a free key? <a href="#" onClick={(e) => { e.preventDefault(); openUrl("https://console.groq.com/keys"); }}>console.groq.com/keys</a>
-            </p>
-          </div>
-        </div>
-      ) : (
         <header className="onb-step-head">
-          <h2>Paste your Groq API key</h2>
+          <h2>AI API Keys</h2>
           <p className="onb-sub">
-            Bulbul uses Groq to transcribe and clean up what you say. You need a free key
-            from <a href="#" onClick={(e) => { e.preventDefault(); openUrl("https://console.groq.com/keys"); }}>console.groq.com/keys</a>.
+            Bulbul uses free API keys for ultra-fast transcription (Groq) and intelligent cleanup (Gemini).
           </p>
         </header>
-      )}
 
-      <div className="onb-key-row">
-        <div className={`onb-key-input-wrap ${keyState === "valid" ? "ok" : keyState === "invalid" ? "bad" : ""}`}>
-          <input
-            type={showKey ? "text" : "password"}
-            className="onb-input"
-            placeholder="gsk_..."
-            value={keyValue}
-            onChange={(e) => { setKeyValue(e.target.value); setKeyState("idle"); setKeyError(""); }}
-            onPaste={handlePaste}
-            onBlur={() => { if (keyState !== "valid" && keyState !== "checking") validateAndSave(); }}
-            spellCheck={false}
-            autoFocus
-          />
+        {/* Key Toggle */}
+        <div className="segmented onb-theme-seg" style={{ margin: "0 auto 16px auto", maxWidth: 380, width: "100%" }}>
           <button
             type="button"
-            className="onb-key-eye"
-            onClick={() => setShowKey((v) => !v)}
-            aria-label={showKey ? "Hide key" : "Show key"}
-            title={showKey ? "Hide" : "Show"}
-            tabIndex={-1}
+            className={`segmented-btn ${hasKey ? "selected" : ""}`}
+            onClick={() => setHasKey(true)}
           >
-            {showKey ? <EyeOffIcon /> : <EyeIcon />}
+            I have API Keys
+          </button>
+          <button
+            type="button"
+            className={`segmented-btn ${!hasKey ? "selected" : ""}`}
+            onClick={() => setHasKey(false)}
+          >
+            Add later in Settings (Skip)
           </button>
         </div>
-        <button
-          type="button"
-          className={`onb-verify-btn state-${keyState}`}
-          onClick={() => validateAndSave()}
-          disabled={keyState === "checking" || keyState === "valid" || keyValue.trim().length === 0}
-        >
-          {verifyLabel}
-        </button>
-      </div>
 
-      <div className="onb-key-status">
-        {keyState === "invalid" && <span className="onb-bad">{keyError}</span>}
-        {keyState === "idle" && keyValue.trim().length === 0 && (
-          <span className="onb-muted">We'll verify it the moment you paste.</span>
+        {!hasKey ? (
+          <div className="onb-value" style={{ margin: "16px auto", maxWidth: 500, padding: "20px 24px", textAlign: "left" }}>
+            <div className="onb-value-title" style={{ fontSize: 15, marginBottom: 6 }}>
+              No API Key Needed Right Now
+            </div>
+            <p style={{ marginBottom: 12 }}>
+              You can proceed to finish setting up your language and keyboard right away.
+            </p>
+            <p className="muted small">
+              Whenever you're ready to dictate, you can paste your free Groq or Gemini API key anytime in <strong>Settings → Account</strong>.
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="onb-key-row">
+              <div className={`onb-key-input-wrap ${keyState === "valid" ? "ok" : keyState === "invalid" ? "bad" : ""}`}>
+                <input
+                  type={showKey ? "text" : "password"}
+                  className="onb-input"
+                  placeholder="Groq key: gsk_..."
+                  value={keyValue}
+                  onChange={(e) => { setKeyValue(e.target.value); setKeyState("idle"); setKeyError(""); }}
+                  onPaste={handlePaste}
+                  onBlur={() => { if (keyState !== "valid" && keyState !== "checking") validateAndSave(); }}
+                  spellCheck={false}
+                  autoFocus
+                />
+                <button
+                  type="button"
+                  className="onb-key-eye"
+                  onClick={() => setShowKey((v) => !v)}
+                  aria-label={showKey ? "Hide key" : "Show key"}
+                  title={showKey ? "Hide" : "Show"}
+                  tabIndex={-1}
+                >
+                  {showKey ? <EyeOffIcon /> : <EyeIcon />}
+                </button>
+              </div>
+              <button
+                type="button"
+                className={`onb-verify-btn state-${keyState}`}
+                onClick={() => validateAndSave()}
+                disabled={keyState === "checking" || keyState === "valid" || keyValue.trim().length === 0}
+              >
+                {verifyLabel}
+              </button>
+            </div>
+
+            <div className="onb-key-status">
+              {keyState === "invalid" && <span className="onb-bad">{keyError}</span>}
+              {keyState === "idle" && keyValue.trim().length === 0 && (
+                <span className="onb-muted">Get a free key from <a href="#" onClick={(e) => { e.preventDefault(); openUrl("https://console.groq.com/keys"); }}>console.groq.com/keys</a></span>
+              )}
+            </div>
+
+            <div style={{ marginTop: 14 }}>
+              <label className="muted small" style={{ display: "block", marginBottom: 4, fontWeight: 500, textAlign: "left" }}>
+                Gemini API Key <span style={{ opacity: 0.7 }}>(Optional, for Phase 2 smart cleanup)</span>
+              </label>
+              <div className="onb-key-input-wrap">
+                <input
+                  type={showGeminiKey ? "text" : "password"}
+                  className="onb-input"
+                  placeholder="AIzaSy..."
+                  value={geminiKey}
+                  onChange={(e) => saveGeminiDirectly(e.target.value)}
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  className="onb-key-eye"
+                  onClick={() => setShowGeminiKey(!showGeminiKey)}
+                  aria-label={showGeminiKey ? "Hide key" : "Show key"}
+                  tabIndex={-1}
+                >
+                  {showGeminiKey ? <EyeOffIcon /> : <EyeIcon />}
+                </button>
+              </div>
+            </div>
+
+            <div className="onb-video-block" style={{ marginTop: 16 }}>
+              <div className="onb-video-frame">
+                <iframe
+                  src={VIDEO_EMBED}
+                  title="How to get a Groq API key"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                />
+              </div>
+              <div className="onb-video-side">
+                <div className="onb-video-caption">Need a free key?</div>
+                <p className="onb-video-desc">
+                  A 60-second walkthrough for grabbing a free Groq API key.
+                </p>
+                <button
+                  className="onb-video-link"
+                  onClick={() => openUrl(VIDEO_URL)}
+                  type="button"
+                >
+                  Open on YouTube →
+                </button>
+              </div>
+            </div>
+          </>
         )}
-      </div>
-
-      <p className="onb-groq-privacy">
-        Bulbul sends your audio &amp; text to Groq (with your own key) to
-        transcribe and clean it. Groq's docs say API data isn't stored or used
-        for training by default —{" "}
-        <a
-          href="#"
-          onClick={(e) => {
-            e.preventDefault();
-            openUrl("https://groq.com/privacy-policy");
-          }}
-        >
-          always check Groq's latest privacy policy
-        </a>
-        .
-      </p>
-
-      <div className="onb-theme-block">
-        <div className="onb-theme-label">Appearance</div>
-        <div className="segmented onb-theme-seg">
-          {THEME_OPTIONS.map((t) => (
-            <button
-              key={t.value}
-              type="button"
-              className={`segmented-btn ${(config.theme || "light") === t.value ? "selected" : ""}`}
-              onClick={() => {
-                // Saved for the main app once setup finishes, but not
-                // applied live here — the wizard itself is locked to
-                // light on Android (see the .onb-shell CSS override),
-                // so previewing dark mid-wizard would just clash with
-                // the light-generated illustrations on the surrounding
-                // screens.
-                if (!IS_ANDROID) applyTheme(t.value);
-                updateConfig({ ...config, theme: t.value });
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="onb-video-block">
-        <div className="onb-video-frame">
-          <iframe
-            src={VIDEO_EMBED}
-            title="How to get a Groq API key"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-            allowFullScreen
-          />
-        </div>
-        <div className="onb-video-side">
-          <div className="onb-video-caption">Don't have a key yet?</div>
-          <p className="onb-video-desc">
-            A 60-second walkthrough for grabbing a free Groq API key.
-          </p>
-          <button
-            className="onb-video-link"
-            onClick={() => openUrl(VIDEO_URL)}
-            type="button"
-          >
-            Open on YouTube →
-          </button>
-        </div>
-      </div>
       </div>
 
       <div className="onb-actions">
         <button className="onb-btn ghost" onClick={onBack}>← Back</button>
         <button
           className="onb-btn primary"
-          onClick={onNext}
-          disabled={keyState !== "valid"}
+          onClick={async () => {
+            if (hasKey && keyValue.trim() && keyState !== "valid") {
+              try { await validateAndSave(); } catch {}
+            }
+            onNext();
+          }}
         >
-          Continue →
+          {hasKey ? "Continue →" : "Continue without Keys →"}
         </button>
       </div>
     </div>
@@ -1187,6 +1412,87 @@ function StepLanguage({ config, updateConfig, onBack, onNext }) {
         />
       </div>
       </div>
+
+      <div className="onb-actions">
+        <button className="onb-btn ghost" onClick={onBack}>← Back</button>
+        <button className="onb-btn primary" onClick={onNext}>Continue →</button>
+      </div>
+    </div>
+  );
+}
+
+function StepKeyboard({ onBack, onNext }) {
+  const [openedSettings, setOpenedSettings] = useState(false);
+  const [openedPicker, setOpenedPicker] = useState(false);
+
+  return (
+    <div className="onb-page-inner">
+      <header className="onb-step-head">
+        <h2>Set up Bulbul Keyboard</h2>
+        <p className="onb-sub">
+          Bulbul is a voice-powered system keyboard. Dictate into any app with one tap.
+        </p>
+      </header>
+
+      <div className="onb-perm-cards">
+        <article className={`onb-perm-card ${openedSettings ? "granted" : ""}`}>
+          <header className="onb-perm-head">
+            <span className="onb-perm-status" aria-hidden>{openedSettings ? "✓" : "1"}</span>
+            <h2>1. Enable Bulbul Keyboard</h2>
+          </header>
+          <p className="muted small">
+            Open Android settings and turn ON Bulbul under "Manage on-screen keyboards".
+          </p>
+          <div className="onb-perm-actions">
+            <button
+              type="button"
+              className="onb-btn"
+              onClick={async () => {
+                try {
+                  await invoke("open_keyboard_settings");
+                  setOpenedSettings(true);
+                } catch (e) {
+                  console.error(e);
+                }
+              }}
+            >
+              Open Keyboard Settings ↗
+            </button>
+          </div>
+          {openedSettings && <p className="onb-perm-confirm muted small">Settings opened. Toggle Bulbul on.</p>}
+        </article>
+
+        <article className={`onb-perm-card ${openedPicker ? "granted" : ""}`}>
+          <header className="onb-perm-head">
+            <span className="onb-perm-status" aria-hidden>{openedPicker ? "✓" : "2"}</span>
+            <h2>2. Switch to Bulbul</h2>
+          </header>
+          <p className="muted small">
+            Select Bulbul as your active keyboard so you can start dictating anywhere.
+          </p>
+          <div className="onb-perm-actions">
+            <button
+              type="button"
+              className="onb-btn"
+              onClick={async () => {
+                try {
+                  await invoke("show_keyboard_picker");
+                  setOpenedPicker(true);
+                } catch (e) {
+                  console.error(e);
+                }
+              }}
+            >
+              Choose Input Method ↗
+            </button>
+          </div>
+          {openedPicker && <p className="onb-perm-confirm muted small">Picker opened. Select Bulbul.</p>}
+        </article>
+      </div>
+
+      <p className="muted small" style={{ textAlign: "center", marginTop: 14 }}>
+        💡 Tip: You can switch back to Samsung Keyboard or Gboard anytime using the keyboard switcher icon at the bottom of your screen.
+      </p>
 
       <div className="onb-actions">
         <button className="onb-btn ghost" onClick={onBack}>← Back</button>
@@ -2227,7 +2533,7 @@ function StepDone({ onFinish, hotkey, telemetryEnabled, onToggleTelemetry }) {
       <h2>You're all set.</h2>
       <p className="onb-lead">
         {IS_ANDROID ? (
-          <>Tap the floating bubble in any app — a chat, your notes, a browser — speak, and Bulbul types what you said.</>
+          <>Open the Bulbul keyboard in any app — a chat, your notes, a browser — tap the mic on the ribbon, speak, and Bulbul types what you said.</>
         ) : (
           <>Press <code>{formatComboForDisplay(hotkey)}</code> anywhere — in your browser, in Word, in a terminal — speak,
           and Bulbul will type what you said.</>
@@ -2254,7 +2560,7 @@ function StepDone({ onFinish, hotkey, telemetryEnabled, onToggleTelemetry }) {
           <div className="onb-tour-title">Tune everything</div>
           <p>
             {IS_ANDROID
-              ? "Change the bubble's size and opacity, cleanup mode, and theme in Settings — anytime."
+              ? "Change language, AI cleanup mode, WebDAV cloud sync, or enable optional floating bubble in Settings anytime."
               : "Change hotkeys, model, theme, mic in Settings — anytime."}
           </p>
         </div>
