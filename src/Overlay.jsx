@@ -295,8 +295,8 @@ export default function Overlay() {
           // decorative state name.
           title={
             vertical && expanded && effectiveState !== "idle"
-              ? (effectiveState === "rate_limited" ? (effectiveMessage || "Rate limited…") : label(effectiveState))
-              : undefined
+              ? (effectiveMessage || label(effectiveState))
+              : (effectiveMessage || undefined)
           }
         >
           {dragging ? (
@@ -306,9 +306,7 @@ export default function Overlay() {
               <span className="pill-icon">{renderIcon(effectiveState, hovered)}</span>
               {expanded && effectiveState !== "idle" && !vertical && (
                 <span className="pill-label">
-                  {effectiveState === "rate_limited"
-                    ? (effectiveMessage || "Rate limited…")
-                    : label(effectiveState)}
+                  {effectiveMessage || label(effectiveState)}
                 </span>
               )}
             </>

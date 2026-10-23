@@ -42,7 +42,7 @@ use tauri::TitleBarStyle;
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 
-const OVERLAY_WIDTH: f64 = 240.0;
+const OVERLAY_WIDTH: f64 = 300.0;
 const OVERLAY_HEIGHT: f64 = 48.0;
 // Gap between the pill and the top of the taskbar / work area.
 const OVERLAY_BOTTOM_MARGIN: f64 = 4.0;
@@ -2833,14 +2833,37 @@ async fn rerun_transcription(
     let is_coding = mode.to_lowercase().contains("tech") || mode.to_lowercase().contains("code");
 
     let t_start = Instant::now();
-    let transcript = if provider.to_lowercase() == "gemini" {
-        gemini::transcribe(&cfg, wav, &vocab, is_coding, Some(&mode))
+    let (transcript, final_model) = if provider.to_lowercase() == "gemini" {
+        if model == "gemini-auto-fallback" || model.trim().is_empty() {
+            gemini::transcribe_with_fallback(
+                &cfg,
+                &wav,
+                &vocab,
+                is_coding,
+                Some(&mode),
+                None,
+                |_, _, _| {},
+            )
             .await
             .map_err(|e| format!("{e:#}"))?
+        } else {
+            let text = gemini::transcribe_model(
+                &cfg,
+                &model,
+                &wav,
+                &vocab,
+                is_coding,
+                Some(&mode),
+            )
+            .await
+            .map_err(|e| format!("{e:#}"))?;
+            (text, model.clone())
+        }
     } else {
-        groq::transcribe(&cfg, wav, &vocab, None)
+        let text = groq::transcribe(&cfg, wav, &vocab, None)
             .await
-            .map_err(|e| format!("{e:#}"))?
+            .map_err(|e| format!("{e:#}"))?;
+        (text, model.clone())
     };
     let latency_ms = t_start.elapsed().as_millis() as u64;
 
@@ -2854,7 +2877,7 @@ async fn rerun_transcription(
         &db,
         &recording_id,
         &provider,
-        &model,
+        &final_model,
         &mode,
         &language_codes,
         &[],
@@ -4322,10 +4345,43 @@ async fn process_pipeline(
     let is_bengali_gemini = cfg.language == "bn-IN" || cfg.language == "bn-IN-tech";
     let is_coding = cfg.language == "bn-IN-tech" || context_mode.as_ref().map(|m| m.name.to_lowercase().contains("code")).unwrap_or(false);
 
+    let mut model_used = if is_bengali_gemini {
+        "gemini-3.5-transcribe".to_string()
+    } else {
+        "whisper-large-v3".to_string()
+    };
+
     let t_stt_start = Instant::now();
     let transcript = if is_bengali_gemini {
-        match gemini::transcribe(&cfg, wav.clone(), &vocabulary, is_coding, Some(phase1_mode)).await {
-            Ok(t) => t,
+        let app_fb = app.clone();
+        let fallback_cb = move |failed_model: &str, next_model: &str, status: u16| {
+            let failed_short = gemini::short_model_name(failed_model);
+            let next_short = gemini::short_model_name(next_model);
+            let status_msg = if status == 503 {
+                format!("{failed_short} busy (503) · Trying {next_short}...")
+            } else if status == 429 {
+                format!("{failed_short} rate limit (429) · Trying {next_short}...")
+            } else if status == 404 {
+                format!("{failed_short} unavailable · Trying {next_short}...")
+            } else {
+                format!("{failed_short} ({status}) · Trying {next_short}...")
+            };
+            emit_status(&app_fb, "processing", Some(status_msg));
+        };
+
+        match gemini::transcribe_with_fallback(
+            &cfg,
+            &wav,
+            &vocabulary,
+            is_coding,
+            Some(phase1_mode),
+            None,
+            fallback_cb,
+        ).await {
+            Ok((t, used_model)) => {
+                model_used = used_model;
+                t
+            }
             Err(e) => {
                 tracing::error!("Gemini STT failed: {e:#}");
                 emit_status(&app, "error", Some(format!("Gemini: {e:#}")));
@@ -4347,10 +4403,10 @@ async fn process_pipeline(
         }
     };
     let t_stt_ms = t_stt_start.elapsed().as_millis() as u64;
-    tracing::debug!("raw transcript: {transcript}");
+    tracing::debug!("raw transcript: {transcript} (model={model_used})");
 
     let provider_name = if is_bengali_gemini { "gemini" } else { "groq" };
-    let model_name = if is_bengali_gemini { "gemini-3.5-transcribe" } else { "whisper-large-v3" };
+    let model_name = &model_used;
     let language_codes = if is_bengali_gemini {
         vec!["bn-IN".to_string(), "en-IN".to_string()]
     } else {

@@ -322,7 +322,7 @@ export default function RecordingCardV2({
 
 export function RerunTranscribeModal({ rec, onClose, onSuccess }) {
   const [provider, setProvider] = useState("gemini");
-  const [model, setModel] = useState("gemini-3.5-transcribe");
+  const [model, setModel] = useState("gemini-auto-fallback");
   const [mode, setMode] = useState("smart");
   const [loading, setLoading] = useState(false);
 
@@ -347,7 +347,7 @@ export function RerunTranscribeModal({ rec, onClose, onSuccess }) {
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "460px" }}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "480px" }}>
         <div className="modal-header">
           <h2>Re-Transcribe Audio</h2>
           <button type="button" className="modal-close-btn" onClick={onClose}>✕</button>
@@ -360,12 +360,51 @@ export function RerunTranscribeModal({ rec, onClose, onSuccess }) {
               onChange={(e) => {
                 const p = e.target.value;
                 setProvider(p);
-                setModel(p === "gemini" ? "gemini-3.5-transcribe" : "whisper-large-v3");
+                setModel(p === "gemini" ? "gemini-auto-fallback" : "whisper-large-v3");
               }}
             >
-              <option value="gemini">Google Gemini 3.5 Transcribe (Recommended for Bengali)</option>
+              <option value="gemini">Google Gemini (Bengali & Banglish Speech-to-Text)</option>
               <option value="groq">Groq Whisper (English)</option>
             </select>
+          </div>
+
+          <div className="form-group">
+            <label>Select Model</label>
+            {provider === "gemini" ? (
+              <select value={model} onChange={(e) => setModel(e.target.value)}>
+                <option value="gemini-auto-fallback">
+                  ✨ Auto Fallback (3.5-transcribe → 3.8-flash → 3.6-flash → 3.5-flash → 3.5-flash-lite)
+                </option>
+                <option value="gemini-3.5-transcribe">
+                  gemini-3.5-transcribe (Native ASR Smart Mode)
+                </option>
+                <option value="gemini-3.8-flash">
+                  gemini-3.8-flash (High-speed Multimodal Audio)
+                </option>
+                <option value="gemini-3.6-flash">
+                  gemini-3.6-flash (Multimodal Audio)
+                </option>
+                <option value="gemini-3.5-flash">
+                  gemini-3.5-flash (Multimodal Audio)
+                </option>
+                <option value="gemini-3.5-flash-lite">
+                  gemini-3.5-flash-lite (Lightweight Audio)
+                </option>
+                <option value="gemini-2.5-flash">
+                  gemini-2.5-flash (Stable Audio)
+                </option>
+              </select>
+            ) : (
+              <select value={model} onChange={(e) => setModel(e.target.value)}>
+                <option value="whisper-large-v3">whisper-large-v3</option>
+                <option value="whisper-large-v3-turbo">whisper-large-v3-turbo</option>
+              </select>
+            )}
+            {provider === "gemini" && model !== "gemini-3.5-transcribe" && model !== "gemini-auto-fallback" && (
+              <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                ℹ️ Multimodal models transcribe audio + apply smart dictation formatting in a single API pass.
+              </div>
+            )}
           </div>
 
           <div className="form-group">

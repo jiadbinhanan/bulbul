@@ -2042,7 +2042,7 @@ fn rerun_transcription(
     _provider: String,
     _model: String,
     _mode: String,
-    _custom_vocabulary: Vec<String>,
+    _custom_vocabulary: Option<Vec<String>>,
 ) -> Result<Value, String> {
     Err("Re-transcription is only available on desktop recordings.".to_string())
 }

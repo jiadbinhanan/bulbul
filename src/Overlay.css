@@ -343,6 +343,18 @@ html, body, #root {
 }
 .pill-rate_limited .pill-label { color: #d4a657; }
 
+/* Processing pill: widens to display fallback model attempts (e.g. 503 retry) or formatting messages */
+.expanded .pill.pill-processing {
+  width: auto;
+  min-width: 96px;
+  max-width: 270px;
+}
+.pill-processing .pill-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .lang-dropdown {
   width: 200px;
   max-height: 200px;

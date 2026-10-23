@@ -4,13 +4,9 @@
 use crate::config::Config;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
-
-const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-transcribe:generateContent";
-
 /// Curated development & coding vocabulary for Banglish code-switching dictation.
-/// Biases Gemini 3.5 Transcribe to keep programming terms in proper English script
+/// Biases Gemini models to keep programming terms in proper English script
 /// rather than phonetic Bengali.
 pub const BANGLISH_CODING_VOCABULARY: &[&str] = &[
     "Next.js", "React", "TypeScript", "JavaScript", "Node.js", "PostgreSQL",
@@ -41,111 +37,63 @@ fn shared_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(reqwest::Client::new)
 }
 
-#[derive(Serialize)]
-struct InlineData<'a> {
-    mime_type: &'a str,
-    data: String,
-}
+/// Ordered fallback list for Google Gemini speech-to-text models.
+/// If gemini-3.5-transcribe is unavailable or overloaded (e.g. 503), the engine
+/// progressively tries the subsequent multimodal Flash models in sequence.
+pub const GEMINI_FALLBACK_MODELS: &[&str] = &[
+    "gemini-3.5-transcribe",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash",
+];
 
-#[derive(Serialize)]
-#[serde(untagged)]
-enum Part<'a> {
-    Inline { inline_data: InlineData<'a> },
-}
-
-#[derive(Serialize)]
-struct Content<'a> {
-    role: &'a str,
-    parts: Vec<Part<'a>>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AudioTranscriptionConfig {
-    language_codes: Vec<String>,
-    mode: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    custom_vocabulary: Vec<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GenerationConfig {
-    audio_transcription_config: AudioTranscriptionConfig,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiRequest<'a> {
-    contents: Vec<Content<'a>>,
-    generation_config: GenerationConfig,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AudioTranscription {
-    #[serde(default)]
-    text: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GeminiPart {
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    audio_transcription: Option<AudioTranscription>,
-}
-
-#[derive(Deserialize)]
-struct GeminiContent {
-    #[serde(default)]
-    parts: Vec<GeminiPart>,
-}
-
-#[derive(Deserialize)]
-struct GeminiCandidate {
-    #[serde(default)]
-    content: Option<GeminiContent>,
-}
-
-#[derive(Deserialize)]
-struct GeminiResponse {
-    #[serde(default)]
-    candidates: Vec<GeminiCandidate>,
-    #[serde(default)]
-    error: Option<GeminiError>,
-}
-
-#[derive(Deserialize)]
-#[allow(dead_code)]
-struct GeminiError {
-    message: String,
-    code: Option<u32>,
-}
-
-/// Transcribes audio using Google's `gemini-3.5-transcribe` model in SMART or VERBATIM mode.
-/// Returns formatted, punctuated Bengali or Banglish text with no filler words.
-pub async fn transcribe(
-    cfg: &Config,
-    wav_bytes: Vec<u8>,
-    vocabulary: &[String],
-    is_coding_mode: bool,
-    mode: Option<&str>,
-) -> Result<String> {
-    let key = cfg.gemini_api_key.trim();
-    if key.is_empty() {
-        return Err(anyhow!(
-            "Google Gemini API key not set. Please add your key in Settings ▸ Account."
-        ));
+/// Returns a human-friendly short model name for display on the overlay pill.
+pub fn short_model_name(model: &str) -> &str {
+    match model {
+        "gemini-3.5-transcribe" => "3.5-transcribe",
+        "gemini-3.8-flash" => "3.8-flash",
+        "gemini-3.6-flash" => "3.6-flash",
+        "gemini-3.5-flash" => "3.5-flash",
+        "gemini-3.5-flash-lite" => "3.5-flash-lite",
+        "gemini-2.5-flash" => "2.5-flash",
+        other => other.strip_prefix("gemini-").unwrap_or(other),
     }
+}
 
-    if wav_bytes.is_empty() {
-        return Ok(String::new());
+/// Checks whether an error is transient/overload and should trigger fallback to the next model.
+pub fn is_fallback_candidate_error(status: u16, err_msg: &str) -> bool {
+    if status == 503 || status == 429 || status == 500 || status == 502 || status == 504 || status == 404 {
+        return true;
     }
+    let lower = err_msg.to_lowercase();
+    lower.contains("unavailable")
+        || lower.contains("overloaded")
+        || lower.contains("resource has been exhausted")
+        || lower.contains("quota")
+        || lower.contains("rate limit")
+        || lower.contains("high demand")
+        || lower.contains("temporarily")
+        || lower.contains("not found")
+}
 
-    // Build custom vocabulary list:
-    // Coding mode incorporates standard developer terminology so coding terms stay in English.
+#[derive(Debug)]
+pub struct GeminiErrorDetail {
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for GeminiErrorDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Gemini error ({}): {}", self.status, self.message)
+    }
+}
+
+impl std::error::Error for GeminiErrorDetail {}
+
+/// Builds custom vocabulary list merging Banglish coding terms and user's dictionary.
+pub fn build_custom_vocab(vocabulary: &[String], is_coding_mode: bool) -> Vec<String> {
     let mut custom_vocab: Vec<String> = if is_coding_mode {
         BANGLISH_CODING_VOCABULARY
             .iter()
@@ -155,7 +103,6 @@ pub async fn transcribe(
         Vec::new()
     };
 
-    // Append user's personal dictionary entries
     for word in vocabulary {
         let trimmed = word.trim();
         if !trimmed.is_empty() && !custom_vocab.iter().any(|v| v.eq_ignore_ascii_case(trimmed)) {
@@ -163,86 +110,320 @@ pub async fn transcribe(
         }
     }
 
-    // Cap vocabulary at 1000 items (Gemini API limit)
     if custom_vocab.len() > 1000 {
         custom_vocab.truncate(1000);
     }
 
-    let b64_audio = BASE64.encode(&wav_bytes);
+    custom_vocab
+}
 
-    let selected_mode = match mode {
-        Some(m) if m.eq_ignore_ascii_case("verbatim") => "VERBATIM",
-        _ => "SMART",
-    };
+/// Builds the system prompt for general multimodal Gemini models (gemini-3.8-flash, etc.).
+/// Since non-transcribe Gemini models accept multimodal audio + instructions in a SINGLE call,
+/// this instructs the model to perform smart speech-to-text dictation with script fidelity,
+/// proper Bengali/Banglish handling, disfluency removal, and developer term preservation.
+pub fn build_multimodal_transcription_prompt(
+    is_coding_mode: bool,
+    mode: Option<&str>,
+    custom_vocab: &[String],
+) -> String {
+    let verbatim = mode.map(|m| m.eq_ignore_ascii_case("verbatim")).unwrap_or(false);
 
-    let request = GeminiRequest {
-        contents: vec![Content {
-            role: "user",
-            parts: vec![Part::Inline {
-                inline_data: InlineData {
-                    mime_type: "audio/wav",
-                    data: b64_audio,
-                },
-            }],
-        }],
-        generation_config: GenerationConfig {
-            audio_transcription_config: AudioTranscriptionConfig {
-                language_codes: vec!["bn-IN".to_string(), "en-IN".to_string()],
-                mode: selected_mode.to_string(),
-                custom_vocabulary: custom_vocab,
-            },
-        },
-    };
+    let mut prompt = String::from(
+        "You are an expert, highly accurate speech-to-text dictation engine. \
+        Transcribe the user's spoken audio faithfully into clean, natural text.\n\n\
+        Rules & Guidelines:\n\
+        1. Language & Script Fidelity:\n\
+           - The speech contains Bengali (বাংলা), English, or mixed Banglish (Bengali speech with English technical terms).\n\
+           - Transcribe standard Bengali words in authentic Bengali script (বাংলা লিপি).\n\
+           - Write English technical, programming, and development terms in standard English script (e.g. 'React component', 'API route', 'PR merge', 'state hook', 'bug fix'). Do not transliterate technical words into phonetic Bengali script.\n\
+        2. Transcription Mode:\n"
+    );
 
-    let url = format!("{GEMINI_API_BASE}?key={key}");
+    if verbatim {
+        prompt.push_str(
+            "   - Mode: VERBATIM. Transcribe every spoken word and sound precisely as uttered, keeping stutters and repetitions.\n"
+        );
+    } else {
+        prompt.push_str(
+            "   - Mode: SMART. Format sentences with proper capitalization and punctuation (full stops, commas, question marks). Silently remove stutters, false starts, filler sounds (uh, um, mane, mane ki, arki), and throat clears.\n"
+        );
+    }
+
+    if is_coding_mode {
+        prompt.push_str(
+            "3. Developer / Coding Context:\n\
+               - The speaker is dictating software engineering workflows. Keep all syntax, code keywords, variable naming patterns, and CLI commands in proper English spelling.\n"
+        );
+    }
+
+    if !custom_vocab.is_empty() {
+        prompt.push_str(&format!(
+            "4. Priority Vocabulary Dictionary:\n\
+               - Keep the following terms in accurate spelling/casing: {}\n",
+            custom_vocab.join(", ")
+        ));
+    }
+
+    prompt.push_str(
+        "\nOutput Rule:\n\
+        Return ONLY the final transcribed text. Do NOT wrap in markdown quotes, and do NOT add any conversational preamble, intro, or outro."
+    );
+
+    prompt
+}
+
+/// Transcribes audio using a specific Google Gemini model.
+/// For `gemini-3.5-transcribe`: uses native `audioTranscriptionConfig`.
+/// For general multimodal models (e.g. `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, etc.):
+/// uses single-step multimodal audio + system prompt dictation.
+pub async fn transcribe_model(
+    cfg: &Config,
+    model: &str,
+    wav_bytes: &[u8],
+    vocabulary: &[String],
+    is_coding_mode: bool,
+    mode: Option<&str>,
+) -> std::result::Result<String, GeminiErrorDetail> {
+    let key = cfg.gemini_api_key.trim();
+    if key.is_empty() {
+        return Err(GeminiErrorDetail {
+            status: 401,
+            message: "Google Gemini API key not set. Please add your key in Settings ▸ Account.".to_string(),
+        });
+    }
+
+    if wav_bytes.is_empty() {
+        return Ok(String::new());
+    }
+
+    let custom_vocab = build_custom_vocab(vocabulary, is_coding_mode);
+    let b64_audio = BASE64.encode(wav_bytes);
     let client = shared_client();
+
+    let target_model = if model.trim().is_empty() {
+        "gemini-3.5-transcribe"
+    } else {
+        model.trim()
+    };
+
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        target_model, key
+    );
+
+    let is_transcribe_specialized = target_model.eq_ignore_ascii_case("gemini-3.5-transcribe")
+        || target_model.to_lowercase().contains("transcribe");
+
+    let req_body = if is_transcribe_specialized {
+        let selected_mode = match mode {
+            Some(m) if m.eq_ignore_ascii_case("verbatim") => "VERBATIM",
+            _ => "SMART",
+        };
+        serde_json::json!({
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "inlineData": {
+                                "mimeType": "audio/wav",
+                                "data": b64_audio
+                            }
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "audioTranscriptionConfig": {
+                    "languageCodes": ["bn-IN", "en-IN"],
+                    "mode": selected_mode,
+                    "customVocabulary": custom_vocab
+                }
+            }
+        })
+    } else {
+        // Multimodal model (e.g. gemini-3.8-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.5-flash-lite, gemini-2.5-flash)
+        let sys_prompt = build_multimodal_transcription_prompt(is_coding_mode, mode, &custom_vocab);
+        serde_json::json!({
+            "systemInstruction": {
+                "parts": [{ "text": sys_prompt }]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "inlineData": {
+                                "mimeType": "audio/wav",
+                                "data": b64_audio
+                            }
+                        },
+                        {
+                            "text": "Transcribe this audio recording accurately."
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1
+            }
+        })
+    };
 
     let resp = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .json(&request)
+        .json(&req_body)
         .send()
         .await
-        .context("sending audio to Gemini 3.5 Transcribe")?;
+        .map_err(|e| GeminiErrorDetail {
+            status: 0,
+            message: format!("network error connecting to {target_model}: {e:#}"),
+        })?;
 
     let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .context("reading Gemini transcription response body")?;
+    let status_code = status.as_u16();
+    let body = resp.text().await.map_err(|e| GeminiErrorDetail {
+        status: status_code,
+        message: format!("reading response from {target_model}: {e:#}"),
+    })?;
 
     if !status.is_success() {
-        if let Ok(parsed) = serde_json::from_str::<GeminiResponse>(&body) {
-            if let Some(err) = parsed.error {
-                return Err(anyhow!("Gemini error ({}): {}", status, err.message));
+        let mut err_msg = body.clone();
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(msg) = parsed["error"]["message"].as_str() {
+                err_msg = msg.to_string();
             }
         }
-        return Err(anyhow!("Gemini request failed ({status}): {body}"));
+        return Err(GeminiErrorDetail {
+            status: status_code,
+            message: err_msg,
+        });
     }
 
-    let parsed: GeminiResponse = serde_json::from_str(&body)
-        .with_context(|| format!("parsing Gemini transcription response: {body}"))?;
+    let val: serde_json::Value = serde_json::from_str(&body).map_err(|e| GeminiErrorDetail {
+        status: status_code,
+        message: format!("parsing JSON from {target_model}: {e:#}"),
+    })?;
 
-    let text = parsed
-        .candidates
-        .into_iter()
-        .filter_map(|c| c.content)
-        .flat_map(|c| c.parts)
-        .map(|p| {
-            if let Some(at) = p.audio_transcription {
-                if !at.text.is_empty() {
-                    return at.text;
+    let mut output = String::new();
+    if let Some(candidates) = val["candidates"].as_array() {
+        for candidate in candidates {
+            if let Some(parts) = candidate["content"]["parts"].as_array() {
+                for part in parts {
+                    // Skip thinking parts if reasoning model
+                    if part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        continue;
+                    }
+                    // For gemini-3.5-transcribe, text might be under audioTranscription.text or text
+                    if let Some(at) = part.get("audioTranscription") {
+                        if let Some(txt) = at.get("text").and_then(|v| v.as_str()) {
+                            if !txt.is_empty() {
+                                output.push_str(txt);
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(txt) = part.get("text").and_then(|v| v.as_str()) {
+                        output.push_str(txt);
+                    }
                 }
             }
-            p.text
-        })
-        .collect::<Vec<_>>()
-        .join("")
-        .trim()
-        .to_string();
+        }
+    }
 
-    tracing::info!("Gemini transcription extracted text ({} chars): '{text}'", text.chars().count());
+    let text = output.trim().to_string();
+    tracing::info!(
+        "Gemini ({target_model}) transcription extracted text ({} chars): '{text}'",
+        text.chars().count()
+    );
 
+    Ok(text)
+}
+
+/// Transcribes audio using Google's Gemini models with automatic fallback.
+/// If a model is busy (503), rate-limited (429), or unavailable, `on_fallback`
+/// is invoked with (failed_model, next_model, status_code) and the next model is tried.
+pub async fn transcribe_with_fallback<F>(
+    cfg: &Config,
+    wav_bytes: &[u8],
+    vocabulary: &[String],
+    is_coding_mode: bool,
+    mode: Option<&str>,
+    preferred_model: Option<&str>,
+    mut on_fallback: F,
+) -> Result<(String, String)>
+where
+    F: FnMut(&str, &str, u16),
+{
+    let mut models_to_try: Vec<&str> = Vec::new();
+
+    if let Some(pref) = preferred_model {
+        let trimmed = pref.trim();
+        if !trimmed.is_empty() && trimmed != "gemini-auto-fallback" {
+            models_to_try.push(trimmed);
+        }
+    }
+
+    for fallback in GEMINI_FALLBACK_MODELS {
+        if !models_to_try.contains(fallback) {
+            models_to_try.push(fallback);
+        }
+    }
+
+    let mut last_err = anyhow!("No Gemini models available.");
+
+    for i in 0..models_to_try.len() {
+        let current_model = models_to_try[i];
+        match transcribe_model(cfg, current_model, wav_bytes, vocabulary, is_coding_mode, mode).await {
+            Ok(transcript) => {
+                return Ok((transcript, current_model.to_string()));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Gemini model '{current_model}' failed with status {}: {}",
+                    err.status,
+                    err.message
+                );
+
+                let is_recoverable = is_fallback_candidate_error(err.status, &err.message);
+                let has_next = i + 1 < models_to_try.len();
+
+                if is_recoverable && has_next {
+                    let next_model = models_to_try[i + 1];
+                    on_fallback(current_model, next_model, err.status);
+                    last_err = anyhow!("{current_model} failed ({}): {}", err.status, err.message);
+                    continue;
+                } else {
+                    return Err(anyhow!("{current_model} failed ({}): {}", err.status, err.message));
+                }
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+/// Transcribes audio using Google's default fallback sequence.
+/// Backward-compatible wrapper over `transcribe_with_fallback`.
+#[allow(dead_code)]
+pub async fn transcribe(
+    cfg: &Config,
+    wav_bytes: Vec<u8>,
+    vocabulary: &[String],
+    is_coding_mode: bool,
+    mode: Option<&str>,
+) -> Result<String> {
+    let (text, _) = transcribe_with_fallback(
+        cfg,
+        &wav_bytes,
+        vocabulary,
+        is_coding_mode,
+        mode,
+        None,
+        |_, _, _| {},
+    )
+    .await?;
     Ok(text)
 }
 
