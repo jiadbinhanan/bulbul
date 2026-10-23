@@ -12,6 +12,34 @@ export function formatSecs(s) {
   return `${m}:${sec < 10 ? "0" : ""}${sec}`;
 }
 
+export function formatLatency(ms) {
+  if (ms === null || ms === undefined || ms === 0) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+export function countWords(text) {
+  if (!text) return 0;
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+export function calculateWpm(words, durationMs) {
+  if (!words || !durationMs || durationMs < 600) return null;
+  const secs = durationMs / 1000;
+  const wpm = Math.round((words / secs) * 60);
+  return wpm > 0 && wpm < 500 ? `${wpm} WPM` : null;
+}
+
+export function AppWindowIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+    </svg>
+  );
+}
+
 export function TrashIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -100,6 +128,15 @@ export default function RecordingCardV2({
       ? currentPostTry.output_text
       : currentTransTry?.transcript_text || "";
 
+  const words = countWords(displayText);
+  const chars = displayText.length;
+  const wpm = calculateWpm(words, recording.duration_ms);
+  const appDisplay = recording.foreground_app_display || recording.foreground_app || null;
+
+  const activeModel = activePhase === "phase2" ? currentPostTry?.model : currentTransTry?.model;
+  const activeProvider = activePhase === "phase2" ? currentPostTry?.provider : currentTransTry?.provider;
+  const activeLatency = activePhase === "phase2" ? currentPostTry?.latency_ms : currentTransTry?.latency_ms;
+
   async function copyToClipboard() {
     try {
       await navigator.clipboard.writeText(displayText);
@@ -125,12 +162,19 @@ export default function RecordingCardV2({
       <div className="history-card-header">
         <div className="history-meta-left">
           <span className="history-time">{dateStr} · {timeStr}</span>
+          {appDisplay && (
+            <span className="history-app-pill" title={`Target Application: ${appDisplay}`}>
+              <AppWindowIcon /> {appDisplay}
+            </span>
+          )}
           <span className="history-audio-duration">
             {(recording.duration_ms / 1000).toFixed(1)}s Audio
           </span>
-          <span className="history-audio-duration">
-            {(recording.file_size_bytes / 1024).toFixed(0)} KB
-          </span>
+          {recording.file_size_bytes > 0 && (
+            <span className="history-audio-duration">
+              {(recording.file_size_bytes / 1024).toFixed(0)} KB
+            </span>
+          )}
         </div>
 
         <div className="history-actions-right">
@@ -251,25 +295,62 @@ export default function RecordingCardV2({
       <div className="history-content-box">
         <div className="content-top-badges">
           <div className="badge-info-cluster">
-            {activePhase === "phase1" && currentTransTry && (
-              <>
-                <span className="badge badge-provider">{currentTransTry.provider}</span>
-                <span className="badge badge-model">{currentTransTry.model}</span>
-                <span className="badge badge-phase1">{currentTransTry.mode.toUpperCase()}</span>
-                <span className="badge muted-badge">{currentTransTry.latency_ms}ms</span>
-              </>
+            {/* Prominent Model Badge */}
+            {activeModel && (
+              <span className="badge badge-model" title={`AI Model that generated this response: ${activeModel}`}>
+                ✨ {activeModel}
+              </span>
             )}
+
+            {/* Provider */}
+            {activeProvider && (
+              <span className="badge badge-provider" title={`Provider: ${activeProvider}`}>
+                {activeProvider.toUpperCase()}
+              </span>
+            )}
+
+            {/* Smart Latency Display: <1000ms => Xms, >=1000ms => X.Xs */}
+            {activeLatency !== undefined && (
+              <span className="badge badge-latency" title={`Processing latency: ${activeLatency}ms`}>
+                ⚡ {formatLatency(activeLatency)}
+              </span>
+            )}
+
+            {/* Word count */}
+            <span className="badge badge-stat" title="Total word count">
+              📝 {words} {words === 1 ? "word" : "words"}
+            </span>
+
+            {/* Character count */}
+            <span className="badge badge-stat" title="Total character count">
+              🔤 {chars} chars
+            </span>
+
+            {/* Speech rate (Words Per Minute) */}
+            {wpm && (
+              <span className="badge badge-wpm" title="Speech speed pacing (Words Per Minute)">
+                🎙️ {wpm}
+              </span>
+            )}
+
+            {/* Phase 1 mode */}
+            {activePhase === "phase1" && currentTransTry && (
+              <span className="badge badge-phase1" title={`Mode: ${currentTransTry.mode}`}>
+                {currentTransTry.mode.toUpperCase()}
+              </span>
+            )}
+
+            {/* Phase 2 context info */}
             {activePhase === "phase2" && currentPostTry && (
               <>
-                <span className="badge badge-active-glow">{currentPostTry.mode_name}</span>
-                <span className="badge badge-provider">{currentPostTry.provider}</span>
-                <span className="badge badge-model">{currentPostTry.model}</span>
+                <span className="badge badge-active-glow" title="Context Mode">
+                  {currentPostTry.mode_name}
+                </span>
                 {currentPostTry.thinking_level && (
-                  <span className="badge badge-thinking">
-                    Thinking: {currentPostTry.thinking_level}
+                  <span className="badge badge-thinking" title="Thinking Level">
+                    🧠 {currentPostTry.thinking_level}
                   </span>
                 )}
-                <span className="badge muted-badge">{currentPostTry.latency_ms}ms</span>
               </>
             )}
           </div>

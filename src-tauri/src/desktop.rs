@@ -4313,6 +4313,8 @@ async fn process_pipeline(
         duration_ms,
         audio_bytes as u64,
         false,
+        meta.foreground_app.as_deref(),
+        meta.foreground_app_display.as_deref(),
     );
 
     // Active Context Mode & Vocabulary Profiles

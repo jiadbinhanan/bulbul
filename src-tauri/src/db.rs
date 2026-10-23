@@ -105,7 +105,9 @@ CREATE TABLE IF NOT EXISTS recordings (
     duration_ms         INTEGER NOT NULL,
     file_size_bytes     INTEGER NOT NULL,
     created_at          INTEGER NOT NULL,
-    is_pinned           INTEGER NOT NULL DEFAULT 0
+    is_pinned           INTEGER NOT NULL DEFAULT 0,
+    foreground_app      TEXT,
+    foreground_app_display TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_recordings_created ON recordings(created_at DESC);
@@ -322,6 +324,8 @@ fn migrate(conn: &Connection) -> Result<()> {
     );
     // Per-transform custom hotkey (null = use the position default Alt/⌘+N).
     let _ = conn.execute("ALTER TABLE transforms ADD COLUMN hotkey TEXT", []);
+    let _ = conn.execute("ALTER TABLE recordings ADD COLUMN foreground_app TEXT", []);
+    let _ = conn.execute("ALTER TABLE recordings ADD COLUMN foreground_app_display TEXT", []);
     Ok(())
 }
 
@@ -2324,6 +2328,8 @@ pub struct RecordingRow {
     pub file_size_bytes: u64,
     pub created_at: i64,
     pub is_pinned: bool,
+    pub foreground_app: Option<String>,
+    pub foreground_app_display: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2395,6 +2401,8 @@ pub fn save_recording(
     duration_ms: u64,
     file_size_bytes: u64,
     is_pinned: bool,
+    foreground_app: Option<&str>,
+    foreground_app_display: Option<&str>,
 ) -> Result<()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2402,9 +2410,18 @@ pub fn save_recording(
         .unwrap_or(0);
     let conn = db.lock();
     conn.execute(
-        "INSERT INTO recordings (id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned)
-         VALUES (?, ?, ?, ?, ?, ?)",
-        params![id, audio_file_path, duration_ms as i64, file_size_bytes as i64, now, if is_pinned { 1 } else { 0 }],
+        "INSERT INTO recordings (id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned, foreground_app, foreground_app_display)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        params![
+            id,
+            audio_file_path,
+            duration_ms as i64,
+            file_size_bytes as i64,
+            now,
+            if is_pinned { 1 } else { 0 },
+            foreground_app,
+            foreground_app_display
+        ],
     ).context("inserting recording")?;
     Ok(())
 }
@@ -2465,7 +2482,7 @@ pub fn save_post_process_try(
 pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<FullRecordingDetail>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(
-        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned
+        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned, foreground_app, foreground_app_display
          FROM recordings
          ORDER BY created_at DESC
          LIMIT ? OFFSET ?",
@@ -2479,6 +2496,8 @@ pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<Full
                 file_size_bytes: row.get::<_, i64>(3)? as u64,
                 created_at: row.get(4)?,
                 is_pinned: row.get::<_, i64>(5)? != 0,
+                foreground_app: row.get(6)?,
+                foreground_app_display: row.get(7)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -2547,7 +2566,7 @@ pub fn list_full_recordings(db: &Db, limit: u32, offset: u32) -> Result<Vec<Full
 pub fn get_full_recording(db: &Db, recording_id: &str) -> Result<Option<FullRecordingDetail>> {
     let conn = db.lock();
     let mut stmt = conn.prepare(
-        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned
+        "SELECT id, audio_file_path, duration_ms, file_size_bytes, created_at, is_pinned, foreground_app, foreground_app_display
          FROM recordings
          WHERE id = ?",
     )?;
@@ -2559,6 +2578,8 @@ pub fn get_full_recording(db: &Db, recording_id: &str) -> Result<Option<FullReco
             file_size_bytes: row.get::<_, i64>(3)? as u64,
             created_at: row.get(4)?,
             is_pinned: row.get::<_, i64>(5)? != 0,
+            foreground_app: row.get(6)?,
+            foreground_app_display: row.get(7)?,
         })
     })?;
 

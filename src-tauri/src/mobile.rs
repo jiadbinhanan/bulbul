@@ -1780,6 +1780,10 @@ fn list_recordings_v2(app: tauri::AppHandle, limit: Option<u32>, offset: Option<
             let cleaned_text = r["cleaned_text"].as_str().unwrap_or("");
             let is_pinned = r.get("is_pinned").and_then(|v| v.as_bool()).unwrap_or(false);
             let mode = r.get("mode").and_then(|v| v.as_str()).unwrap_or("smart");
+            let model = r.get("model").and_then(|v| v.as_str()).unwrap_or("gemini-3.5-flash");
+            let latency_ms = r.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(350);
+            let fg_app = r.get("foreground_app").and_then(|v| v.as_str()).unwrap_or("com.bulbul.app");
+            let fg_display = r.get("foreground_app_display").and_then(|v| v.as_str()).unwrap_or("Android");
 
             json!({
                 "recording": {
@@ -1788,19 +1792,21 @@ fn list_recordings_v2(app: tauri::AppHandle, limit: Option<u32>, offset: Option<
                     "duration_ms": duration_ms,
                     "file_size_bytes": 0,
                     "created_at": created_at,
-                    "is_pinned": is_pinned
+                    "is_pinned": is_pinned,
+                    "foreground_app": fg_app,
+                    "foreground_app_display": fg_display
                 },
                 "transcription_tries": [
                     {
                         "id": id_val,
                         "recording_id": id_str,
                         "provider": "gemini",
-                        "model": "gemini-3.5-flash",
+                        "model": model,
                         "mode": mode,
                         "language_codes": ["bn", "en"],
                         "vocabulary_profile_ids": [],
                         "transcript_text": cleaned_text,
-                        "latency_ms": 0,
+                        "latency_ms": latency_ms,
                         "created_at": created_at
                     }
                 ],
@@ -1828,6 +1834,11 @@ fn get_full_recording_v2(app: tauri::AppHandle, id: String) -> Result<Option<Val
         let cleaned_text = r["cleaned_text"].as_str().unwrap_or("");
         let is_pinned = r.get("is_pinned").and_then(|v| v.as_bool()).unwrap_or(false);
         let mode = r.get("mode").and_then(|v| v.as_str()).unwrap_or("smart");
+        let model = r.get("model").and_then(|v| v.as_str()).unwrap_or("gemini-3.5-flash");
+        let latency_ms = r.get("latency_ms").and_then(|v| v.as_u64()).unwrap_or(350);
+        let fg_app = r.get("foreground_app").and_then(|v| v.as_str()).unwrap_or("com.bulbul.app");
+        let fg_display = r.get("foreground_app_display").and_then(|v| v.as_str()).unwrap_or("Android");
+
         return Ok(Some(json!({
             "recording": {
                 "id": id_str,
@@ -1835,19 +1846,21 @@ fn get_full_recording_v2(app: tauri::AppHandle, id: String) -> Result<Option<Val
                 "duration_ms": duration_ms,
                 "file_size_bytes": 0,
                 "created_at": created_at,
-                "is_pinned": is_pinned
+                "is_pinned": is_pinned,
+                "foreground_app": fg_app,
+                "foreground_app_display": fg_display
             },
             "transcription_tries": [
                 {
                     "id": id_val,
                     "recording_id": id_str,
                     "provider": "gemini",
-                    "model": "gemini-3.5-flash",
+                    "model": model,
                     "mode": mode,
                     "language_codes": ["bn", "en"],
                     "vocabulary_profile_ids": [],
                     "transcript_text": cleaned_text,
-                    "latency_ms": 0,
+                    "latency_ms": latency_ms,
                     "created_at": created_at
                 }
             ],
