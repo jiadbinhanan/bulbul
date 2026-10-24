@@ -2458,7 +2458,7 @@ async fn process_android_audio(
         &cfg.language
     };
 
-    let is_bengali_gemini = lang == "bn-IN" || lang == "bn-IN-tech";
+    let is_bengali_gemini = lang == "bn" || lang == "bn-IN" || lang == "bn-IN-tech" || lang == "auto";
     let is_coding = lang == "bn-IN-tech" || context_mode.as_ref().map(|m| m.name.to_lowercase().contains("code")).unwrap_or(false);
     let phase1_mode = opts.phase1_mode.as_deref()
         .unwrap_or_else(|| context_mode.as_ref().map(|m| m.default_phase1_mode.as_str()).unwrap_or("smart"));
@@ -2482,15 +2482,19 @@ async fn process_android_audio(
             is_coding,
             Some(phase1_mode),
             None,
-            |_, _, _| {},
+            |failed, next, code| {
+                tracing::warn!("Android Gemini fallback: {failed} failed ({code}), trying {next}...");
+            },
         ).await {
             Ok((t, m)) => {
                 model_used = m;
                 t
             }
             Err(e) => {
-                tracing::warn!("Android Gemini STT failed ({e:#}), trying Groq fallback if available");
-                if has_groq {
+                tracing::error!("Android Gemini STT fallback chain exhausted: {e:#}");
+                // Strict rule: Bengali/Banglish NEVER falls back to Groq Whisper
+                if !is_bengali_gemini && has_groq {
+                    tracing::info!("Non-Bengali audio: trying Groq Whisper as secondary fallback");
                     match groq::transcribe(&cfg, primary_audio.to_vec(), &vocabulary, None).await {
                         Ok(t) => {
                             model_used = "whisper-large-v3".to_string();

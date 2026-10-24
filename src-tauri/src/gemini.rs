@@ -38,26 +38,25 @@ fn shared_client() -> &'static reqwest::Client {
 }
 
 /// Ordered fallback list for Google Gemini speech-to-text models.
-/// If gemini-3.5-transcribe is unavailable or overloaded (e.g. 503), the engine
-/// progressively tries the subsequent multimodal Flash models in sequence.
+/// Strict fallback order:
+/// 1. `gemini-3.5-transcribe` (primary specialized transcription model)
+/// 2. `gemini-3.6-flash` (fastest multimodal fallback)
+/// 3. `gemini-3.5-flash` (standard multimodal fallback)
+/// 4. `gemini-3.5-flash-lite` (lightweight resilient fallback)
 pub const GEMINI_FALLBACK_MODELS: &[&str] = &[
     "gemini-3.5-transcribe",
-    "gemini-3.8-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-2.5-flash",
 ];
 
 /// Returns a human-friendly short model name for display on the overlay pill.
 pub fn short_model_name(model: &str) -> &str {
     match model {
         "gemini-3.5-transcribe" => "3.5-transcribe",
-        "gemini-3.8-flash" => "3.8-flash",
         "gemini-3.6-flash" => "3.6-flash",
         "gemini-3.5-flash" => "3.5-flash",
         "gemini-3.5-flash-lite" => "3.5-flash-lite",
-        "gemini-2.5-flash" => "2.5-flash",
         other => other.strip_prefix("gemini-").unwrap_or(other),
     }
 }

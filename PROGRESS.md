@@ -93,4 +93,39 @@
   - `src-tauri/gen/android/app/proguard-rules.pro`
   - `PROGRESS.md`
 - **Deviations from the prompt:** None.
-- **Ready for next phase?** Yes; all 5 phases of the action plan have been successfully executed and verified.
+- **Ready for next phase?** Yes; ready for Phase 5(a) (Strict Fallback, Manifest Hardening, Verification & Production Build).
+
+## Phase 5(a): Strict Gemini Fallback Chain, AndroidManifest Hardening, Toolchain Verification & Version Bump
+- **Phase / Status:** Phase 5(a) / PASS
+- **Commands run:**
+  - `.\gradlew.bat :app:compileArmDebugKotlin`
+  - `.\gradlew.bat :app:compileArm64DebugKotlin`
+  - `cargo check --manifest-path src-tauri/Cargo.toml`
+  - `git status`
+- **Key output:**
+  - **Strict Gemini Fallback Chain Enforced:**
+    - Updated `GEMINI_FALLBACK_MODELS` in `src-tauri/src/gemini.rs` to strictly follow:
+      `gemini-3.5-transcribe` ➔ `gemini-3.6-flash` ➔ `gemini-3.5-flash` ➔ `gemini-3.5-flash-lite`.
+    - Enforced rule in `src-tauri/src/mobile.rs`: Bengali/Banglish audio (`bn`, `bn-IN`, `bn-IN-tech`, `auto`) is Gemini-exclusive and NEVER falls back to Groq Whisper, eliminating hallucinations and preserving code-switching accuracy.
+  - **AndroidManifest.xml Hardening:**
+    - Added `android:foregroundServiceType="microphone"` to `BulbulInputMethodService` to prevent microphone drops on Android 14+.
+    - Added `<uses-permission android:name="android.permission.VIBRATE" />` for keyboard haptic feedback.
+  - **Compilation Verification:**
+    - Android Kotlin compilation tests (`:app:compileArmDebugKotlin` and `:app:compileArm64DebugKotlin`) ran cleanly with `BUILD SUCCESSFUL`.
+    - Windows desktop compilation (`cargo check`) verified with 0 errors.
+  - **Version Bump for Seamless Over-Install Update:**
+    - Standardized `applicationId = "com.bulbul.app"` in `build.gradle.kts`.
+    - Incremented version from `1.2.2` (code `1002002`) to **`1.2.3`** (code **`1002003`**) across `Cargo.toml`, `Cargo.lock`, `package.json`, `tauri.conf.json`, `tauri.properties`, and `build.gradle.kts` to allow direct in-place over-install updates on Android and Windows without uninstalling or losing data.
+- **Files created or changed:**
+  - `src-tauri/src/gemini.rs`
+  - `src-tauri/src/mobile.rs`
+  - `src-tauri/gen/android/app/src/main/AndroidManifest.xml`
+  - `src-tauri/gen/android/app/build.gradle.kts`
+  - `src-tauri/gen/android/app/tauri.properties`
+  - `src-tauri/Cargo.toml`
+  - `src-tauri/Cargo.lock`
+  - `package.json`
+  - `src-tauri/tauri.conf.json`
+  - `PROGRESS.md`
+- **Deviations from the prompt:** None.
+- **Ready for next phase?** Yes; ready for git push and final application builds.

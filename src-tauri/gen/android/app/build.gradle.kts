@@ -30,8 +30,7 @@ android {
     compileSdk = 36
     ndkVersion = "29.0.13846066"
     namespace = "com.bulbul.app"
-    val isRelease = gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }
-    val defaultAppId = if (isRelease) "xyz.bulbultypes.app" else "com.bulbul.app"
+    val defaultAppId = "com.bulbul.app"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = project.findProperty("applicationId") as? String ?: defaultAppId

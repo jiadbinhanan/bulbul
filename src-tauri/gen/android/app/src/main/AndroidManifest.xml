@@ -17,6 +17,8 @@
     <!-- Android 13+ requires runtime opt-in for the foreground service
          notification icon. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Vibrate permission for keyboard haptic feedback -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -122,6 +124,7 @@
             android:name=".BulbulInputMethodService"
             android:exported="true"
             android:label="@string/ime_name"
+            android:foregroundServiceType="microphone"
             android:permission="android.permission.BIND_INPUT_METHOD">
             <intent-filter>
                 <action android:name="android.view.InputMethod" />
