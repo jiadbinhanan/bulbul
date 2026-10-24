@@ -74,7 +74,7 @@ class AudioRecorder(private val context: Context) {
         }
         val bufSize = maxOf(minBuf, SAMPLE_RATE_HZ * 2) // ~1s buffer headroom
 
-        val r = try {
+        var r = try {
             @Suppress("MissingPermission") // checked above
             AudioRecord(
                 // VOICE_RECOGNITION requests the ASR-tuned capture path,
@@ -88,12 +88,29 @@ class AudioRecorder(private val context: Context) {
                 bufSize,
             )
         } catch (t: Throwable) {
-            Log.w(TAG, "AudioRecord ctor threw", t)
-            return false
+            Log.w(TAG, "AudioRecord VOICE_RECOGNITION ctor threw", t)
+            null
         }
-        if (r.state != AudioRecord.STATE_INITIALIZED) {
-            Log.w(TAG, "AudioRecord did not initialize (state=${r.state})")
-            r.release()
+        if (r == null || r.state != AudioRecord.STATE_INITIALIZED) {
+            r?.release()
+            Log.w(TAG, "VOICE_RECOGNITION uninitialized, attempting MIC fallback")
+            r = try {
+                @Suppress("MissingPermission")
+                AudioRecord(
+                    MediaRecorder.AudioSource.MIC,
+                    SAMPLE_RATE_HZ,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufSize,
+                )
+            } catch (t: Throwable) {
+                Log.w(TAG, "AudioRecord MIC fallback threw", t)
+                null
+            }
+        }
+        if (r == null || r.state != AudioRecord.STATE_INITIALIZED) {
+            Log.w(TAG, "AudioRecord did not initialize with either source")
+            r?.release()
             return false
         }
 

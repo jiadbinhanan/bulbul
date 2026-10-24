@@ -2275,11 +2275,40 @@ pub struct ProcessAudioResult {
     pub post_process_try_id: Option<i64>,
 }
 
+fn wrap_pcm_as_wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
+    let num_channels: u16 = 1;
+    let bits_per_sample: u16 = 16;
+    let byte_rate = sample_rate * (num_channels as u32) * (bits_per_sample as u32) / 8;
+    let block_align = num_channels * bits_per_sample / 8;
+    let data_len = pcm.len() as u32;
+    let total_len = data_len + 36;
+
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&total_len.to_le_bytes());
+    wav.extend_from_slice(b"WAVE");
+    wav.extend_from_slice(b"fmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&num_channels.to_le_bytes());
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    wav
+}
+
 async fn process_android_audio(
     pcm_bytes: Vec<u8>,
     sample_rate: u32,
     opts: ProcessAudioOptions,
 ) -> ProcessAudioResult {
+    // Ensure rustls has a crypto provider installed for this process/thread
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if pcm_bytes.is_empty() {
         return ProcessAudioResult::default();
     }
@@ -2301,6 +2330,18 @@ async fn process_android_audio(
         Vec::new()
     };
 
+    let wav_fallback = if opus.is_empty() {
+        wrap_pcm_as_wav(&pcm_bytes, sample_rate)
+    } else {
+        Vec::new()
+    };
+
+    let primary_audio: &[u8] = if !opus.is_empty() {
+        &opus
+    } else {
+        &wav_fallback
+    };
+
     let cfg = config::load();
     let db = match db::open() {
         Ok(d) => d,
@@ -2311,7 +2352,6 @@ async fn process_android_audio(
     };
 
     let recording_id = uuid::Uuid::new_v4().to_string();
-    let primary_audio = if !opus.is_empty() { &opus } else { &pcm_bytes };
     let audio_file_name = if !opus.is_empty() {
         format!("{recording_id}.opus")
     } else {
@@ -2383,14 +2423,18 @@ async fn process_android_audio(
     let phase1_mode = opts.phase1_mode.as_deref()
         .unwrap_or_else(|| context_mode.as_ref().map(|m| m.default_phase1_mode.as_str()).unwrap_or("smart"));
 
+    let has_gemini = !cfg.gemini_api_key.trim().is_empty();
+    let has_groq = !cfg.groq_api_key.trim().is_empty();
+    let use_gemini = is_bengali_gemini || (!has_groq && has_gemini);
+
     let t_stt_start = Instant::now();
-    let mut model_used = if is_bengali_gemini {
+    let mut model_used = if use_gemini {
         "gemini-3.5-transcribe".to_string()
     } else {
         "whisper-large-v3".to_string()
     };
 
-    let transcript = if is_bengali_gemini {
+    let transcript = if use_gemini {
         match gemini::transcribe_with_fallback(
             &cfg,
             primary_audio,
@@ -2405,24 +2449,63 @@ async fn process_android_audio(
                 t
             }
             Err(e) => {
-                tracing::error!("Android Gemini STT failed: {e:#}");
-                return ProcessAudioResult {
-                    recording_id,
-                    ..Default::default()
-                };
+                tracing::warn!("Android Gemini STT failed ({e:#}), trying Groq fallback if available");
+                if has_groq {
+                    match groq::transcribe(&cfg, primary_audio.to_vec(), &vocabulary, None).await {
+                        Ok(t) => {
+                            model_used = "whisper-large-v3".to_string();
+                            t
+                        }
+                        Err(ge) => {
+                            tracing::error!("Android Groq fallback also failed: {ge:#}");
+                            return ProcessAudioResult {
+                                recording_id,
+                                ..Default::default()
+                            };
+                        }
+                    }
+                } else {
+                    return ProcessAudioResult {
+                        recording_id,
+                        ..Default::default()
+                    };
+                }
             }
         }
     } else {
         match groq::transcribe(&cfg, primary_audio.to_vec(), &vocabulary, None).await {
             Ok(t) => t,
             Err(e) => {
-                tracing::error!("Android Groq STT failed: {e:#}");
-                return ProcessAudioResult {
-                    recording_id,
-                    ..Default::default()
-                };
+                tracing::warn!("Android Groq STT failed ({e:#}), trying Gemini fallback if available");
+                if has_gemini {
+                    match gemini::transcribe_with_fallback(
+                        &cfg,
+                        primary_audio,
+                        &vocabulary,
+                        is_coding,
+                        Some(phase1_mode),
+                        None,
+                        |_, _, _| {},
+                    ).await {
+                        Ok((t, m)) => {
+                            model_used = m;
+                            t
+                        }
+                        Err(ge) => {
+                            tracing::error!("Android Gemini fallback also failed: {ge:#}");
+                            return ProcessAudioResult {
+                                recording_id,
+                                ..Default::default()
+                            };
+                        }
+                    }
+                } else {
+                    return ProcessAudioResult {
+                        recording_id,
+                        ..Default::default()
+                    };
+                }
             }
-        }
     };
 
     let t_stt_ms = t_stt_start.elapsed().as_millis() as u64;
@@ -2775,6 +2858,9 @@ pub mod jni_bridge {
         _class: JClass,
         dir_path: JString,
     ) {
+        // Guarantee rustls has an active crypto provider for any background Android service
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         if let Ok(vm) = env.get_java_vm() {
             let _ = JVM.set(vm);
         }

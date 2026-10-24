@@ -789,25 +789,44 @@ pub fn recordings_dir() -> Result<PathBuf> {
 }
 
 pub fn load() -> Config {
-    let path = match config_path() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("could not resolve config path: {e:#}");
-            return Config::default();
-        }
-    };
-    let cfg = match fs::read_to_string(&path) {
-        Ok(text) => match serde_json::from_str::<Config>(&text) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                tracing::warn!("invalid config at {path:?}: {e:#} — using defaults");
-                Config::default()
+    let mut candidate_paths = Vec::new();
+    if let Ok(p) = config_path() {
+        candidate_paths.push(p);
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        for candidate in &[
+            "/data/user/0/com.bulbul.app/files/config.json",
+            "/data/user/0/com.bulbul.app/config.json",
+            "/data/data/com.bulbul.app/files/config.json",
+            "/data/data/com.bulbul.app/config.json",
+            "/data/user/0/xyz.bulbultypes.app/files/config.json",
+            "/data/user/0/xyz.bulbultypes.app/config.json",
+            "/data/data/xyz.bulbultypes.app/files/config.json",
+            "/data/data/xyz.bulbultypes.app/config.json",
+        ] {
+            let p = PathBuf::from(candidate);
+            if !candidate_paths.contains(&p) {
+                candidate_paths.push(p);
             }
-        },
-        Err(_) => Config::default(),
-    };
-    migrate(cfg)
+        }
+    }
+
+    for path in &candidate_paths {
+        if path.exists() {
+            if let Ok(text) = fs::read_to_string(path) {
+                if let Ok(cfg) = serde_json::from_str::<Config>(&text) {
+                    return migrate(cfg);
+                }
+            }
+        }
+    }
+
+    tracing::warn!("could not resolve valid config at candidate paths — using defaults");
+    Config::default()
 }
+
 
 /// Cleanup models we still support (keep in sync with groq.rs CLEANUP_FALLBACK).
 /// A saved `chat_model` outside this set is stale — `migrate` sweeps it onto

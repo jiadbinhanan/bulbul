@@ -118,7 +118,8 @@ object BulbulBridge {
 
     fun ensureInitialized(context: android.content.Context) {
         try {
-            initDataDir(context.filesDir.absolutePath)
+            val dir = BulbulConfig.dataDir(context)
+            initDataDir(dir.absolutePath)
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to initDataDir", t)
         }
