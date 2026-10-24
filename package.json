@@ -9,6 +9,7 @@
     "build": "vite build",
     "build:android": "vite build --mode android",
     "preview": "vite preview",
+    "clean:cache": "cargo clean --manifest-path src-tauri/Cargo.toml",
     "tauri": "tauri"
   },
   "dependencies": {
