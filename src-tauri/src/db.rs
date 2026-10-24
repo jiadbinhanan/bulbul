@@ -350,8 +350,74 @@ fn migrate(conn: &Connection) -> Result<()> {
     let _ = conn.execute("ALTER TABLE context_modes ADD COLUMN updated_at INTEGER", []);
     let _ = conn.execute("ALTER TABLE context_modes ADD COLUMN deleted_at INTEGER", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_recordings_deleted ON recordings(deleted_at)", []);
+    let _ = sync_legacy_dictations_from_recordings(conn);
     Ok(())
 }
+
+/// Synchronizes V2 recordings into legacy dictations table so that HomeStats,
+/// UsageStats, and Insights stay 100% updated on all platforms (especially after WebDAV sync / restore).
+pub fn sync_legacy_dictations_from_recordings(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.created_at, r.duration_ms, r.foreground_app, r.foreground_app_display
+         FROM recordings r
+         WHERE r.deleted_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM dictations d WHERE d.ts = r.created_at)"
+    )?;
+
+    let pending: Vec<(String, i64, u64, Option<String>, Option<String>)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get::<_, i64>(2)? as u64,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })?
+        .filter_map(|res| res.ok())
+        .collect();
+
+    for (rec_id, ts, duration_ms, app, app_display) in pending {
+        let pp_text: Option<String> = conn
+            .query_row(
+                "SELECT output_text FROM post_process_tries WHERE recording_id = ? ORDER BY id DESC LIMIT 1",
+                [&rec_id],
+                |r| r.get(0),
+            )
+            .ok();
+
+        let trans_info: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT transcript_text, mode, language_codes FROM transcription_tries WHERE recording_id = ? ORDER BY id DESC LIMIT 1",
+                [&rec_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+
+        let raw_text = trans_info.as_ref().map(|t| t.0.clone()).unwrap_or_default();
+        let active_text = pp_text.unwrap_or_else(|| raw_text.clone());
+        if active_text.trim().is_empty() && raw_text.trim().is_empty() {
+            continue;
+        }
+
+        let mode = trans_info.as_ref().map(|t| t.1.clone()).unwrap_or_else(|| "smart".to_string());
+        let lang = trans_info.as_ref().and_then(|t| {
+            let parsed: Vec<String> = serde_json::from_str(&t.2).unwrap_or_default();
+            parsed.into_iter().next()
+        }).unwrap_or_else(|| "auto".to_string());
+
+        let word_count = active_text.split_whitespace().count() as i64;
+        let fix_count = count_fixes(&raw_text, &active_text) as i64;
+
+        let _ = conn.execute(
+            "INSERT INTO dictations (ts, raw_text, cleaned_text, mode, language, foreground_app, foreground_app_display, duration_ms, word_count, fix_count)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![ts, raw_text, active_text, mode, lang, app, app_display, duration_ms as i64, word_count, fix_count],
+        );
+    }
+    Ok(())
+}
+
 
 fn seed_default_transforms(conn: &Connection) -> Result<()> {
     let existing: i64 = conn

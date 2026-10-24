@@ -129,6 +129,35 @@ fn set_tray_visible(_visible: bool) -> Result<(), String> {
 const HISTORY_FILE: &str = "history.jsonl";
 
 fn history_rows(app: &tauri::AppHandle) -> Vec<Value> {
+    if let Ok(db) = db::open() {
+        let conn = db.lock();
+        let _ = db::sync_legacy_dictations_from_recordings(&conn);
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT ts, raw_text, cleaned_text, mode, language, foreground_app, duration_ms, word_count, fix_count
+             FROM dictations
+             ORDER BY ts ASC",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |row| {
+                Ok(json!({
+                    "ts": row.get::<_, i64>(0)?,
+                    "raw_text": row.get::<_, String>(1)?,
+                    "cleaned_text": row.get::<_, String>(2)?,
+                    "mode": row.get::<_, String>(3)?,
+                    "language": row.get::<_, String>(4)?,
+                    "foreground_app": row.get::<_, Option<String>>(5)?,
+                    "duration_ms": row.get::<_, i64>(6)?,
+                    "word_count": row.get::<_, i64>(7)?,
+                    "fix_count": row.get::<_, i64>(8)?,
+                }))
+            }) {
+                let list: Vec<Value> = rows.filter_map(|r| r.ok()).collect();
+                if !list.is_empty() {
+                    return list;
+                }
+            }
+        }
+    }
+
     let Ok(dir) = app.path().app_data_dir() else { return Vec::new() };
     let Ok(text) = std::fs::read_to_string(dir.join(HISTORY_FILE)) else { return Vec::new() };
     text.lines()
@@ -814,8 +843,8 @@ Return ONLY a JSON object, no preamble and no markdown fences:\n\
 #[tauri::command]
 async fn refresh_voice_narrative(app: tauri::AppHandle) -> Result<Value, String> {
     let cfg = read_config(&app).unwrap_or_default();
-    if !cfg.has_api_key() {
-        return Err("Set your Groq API key in Settings first.".to_string());
+    if !cfg.has_api_key() && cfg.gemini_api_key.trim().is_empty() {
+        return Err("Set your Gemini or Groq API key in Settings first.".to_string());
     }
     let rows = history_rows(&app);
     let total_words: i64 = rows.iter().map(|r| r["word_count"].as_i64().unwrap_or(0)).sum();
@@ -838,17 +867,28 @@ async fn refresh_voice_narrative(app: tauri::AppHandle) -> Result<Value, String>
         rows.len(),
     );
 
-    // groq_chat_chain (not bare groq_chat) so a retired/rate-limited primary
-    // model falls through to CHAT_FALLBACK instead of dead-ending the whole
-    // Voice tab on one model's failure.
-    let content = groq_chat_chain(
-        cfg.groq_api_key.trim(),
-        &cfg.chat_model,
-        VOICE_PROFILE_SYSTEM_PROMPT,
-        &user,
-        0.4,
-    )
-    .await?;
+    let content = if !cfg.groq_api_key.trim().is_empty() {
+        groq_chat_chain(
+            cfg.groq_api_key.trim(),
+            &cfg.chat_model,
+            VOICE_PROFILE_SYSTEM_PROMPT,
+            &user,
+            0.4,
+        )
+        .await?
+    } else if !cfg.gemini_api_key.trim().is_empty() {
+        gemini::post_process(
+            &cfg,
+            "gemini-2.5-flash",
+            VOICE_PROFILE_SYSTEM_PROMPT,
+            &user,
+            None,
+        )
+        .await
+        .map_err(|e| e.to_string())?
+    } else {
+        return Err("Set your Gemini or Groq API key in Settings first.".to_string());
+    };
 
     // Strip any code fences the model added despite instructions.
     let trimmed = content
@@ -2626,6 +2666,12 @@ async fn process_android_audio(
     } else {
         phase1_raw_text.clone()
     };
+
+    // Synchronize to dictations table so Home/Insights stats update immediately
+    {
+        let conn = db.lock();
+        let _ = db::sync_legacy_dictations_from_recordings(&conn);
+    }
 
     // Auto-sync in background if enabled
     if cfg.webdav_enabled && cfg.webdav_auto_sync {

@@ -705,6 +705,12 @@ pub async fn run_sync(db: &Db, cfg: &Config, recordings_dir: &Path) -> Result<Sy
 
     download_stream.collect::<Vec<()>>().await;
 
+    // Immediately synchronize newly downloaded records into dictations table so charts and stats upgrade instantly
+    {
+        let conn = db.lock();
+        let _ = db::sync_legacy_dictations_from_recordings(&conn);
+    }
+
     // (C) Backup encrypted credentials
     let _ = client.backup_credentials(db, cfg).await;
 

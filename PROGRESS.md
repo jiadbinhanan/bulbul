@@ -39,5 +39,22 @@
   - `src-tauri/gen/android/app/src/main/java/com/bulbul/app/AudioRecorder.kt`
   - `PROGRESS.md`
 - **Deviations from the prompt:** None.
-- **Ready for next phase?** Yes; ready for Phase 3 (Database & Analytics Unification).
-
+## Phase 3: Database & Analytics Unification
+- **Phase / Status:** Phase 3 / PASS
+- **Commands run:**
+  - `cargo check --manifest-path src-tauri/Cargo.toml`
+  - `git diff`
+- **Key output:**
+  - Implemented `sync_legacy_dictations_from_recordings(&conn)` in `src-tauri/src/db.rs` to automatically sync modern V2 `recordings`, `transcription_tries`, and `post_process_tries` into the legacy `dictations` table during migrations and after operations.
+  - Updated `history_rows(app)` in `src-tauri/src/mobile.rs` to query the SQLite database (`dictations`), eliminating empty stats for Words Dictated, WPM, and Streak on Android.
+  - Added SQLite sync trigger to `process_android_audio` in `mobile.rs` so new dictations immediately update analytics.
+  - Updated `refresh_voice_narrative` to support Gemini if Groq API key is not configured, unlocking Voice Profile generation on Android.
+  - Hooked post-download sync in `src-tauri/src/webdav.rs` so restored/synced desktop recordings immediately update Android charts and insights.
+  - Verified host compilation with `cargo check` (0 errors, Windows compatibility preserved).
+- **Files created or changed:**
+  - `src-tauri/src/db.rs`
+  - `src-tauri/src/mobile.rs`
+  - `src-tauri/src/webdav.rs`
+  - `PROGRESS.md`
+- **Deviations from the prompt:** None.
+- **Ready for next phase?** Yes; ready for Phase 4 (FlorisBoard-Inspired Android Keyboard Redesign).
