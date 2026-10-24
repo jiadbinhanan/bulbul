@@ -132,29 +132,35 @@ fn history_rows(app: &tauri::AppHandle) -> Vec<Value> {
     if let Ok(db) = db::open() {
         let conn = db.lock();
         let _ = db::sync_legacy_dictations_from_recordings(&conn);
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT ts, raw_text, cleaned_text, mode, language, foreground_app, duration_ms, word_count, fix_count
-             FROM dictations
-             ORDER BY ts ASC",
-        ) {
-            if let Ok(rows) = stmt.query_map([], |row| {
-                Ok(json!({
-                    "ts": row.get::<_, i64>(0)?,
-                    "raw_text": row.get::<_, String>(1)?,
-                    "cleaned_text": row.get::<_, String>(2)?,
-                    "mode": row.get::<_, String>(3)?,
-                    "language": row.get::<_, String>(4)?,
-                    "foreground_app": row.get::<_, Option<String>>(5)?,
-                    "duration_ms": row.get::<_, i64>(6)?,
-                    "word_count": row.get::<_, i64>(7)?,
-                    "fix_count": row.get::<_, i64>(8)?,
-                }))
-            }) {
-                let list: Vec<Value> = rows.filter_map(|r| r.ok()).collect();
-                if !list.is_empty() {
-                    return list;
+        let list: Vec<Value> = {
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT ts, raw_text, cleaned_text, mode, language, foreground_app, duration_ms, word_count, fix_count
+                 FROM dictations
+                 ORDER BY ts ASC",
+            ) {
+                if let Ok(rows) = stmt.query_map([], |row| {
+                    Ok(json!({
+                        "ts": row.get::<_, i64>(0)?,
+                        "raw_text": row.get::<_, String>(1)?,
+                        "cleaned_text": row.get::<_, String>(2)?,
+                        "mode": row.get::<_, String>(3)?,
+                        "language": row.get::<_, String>(4)?,
+                        "foreground_app": row.get::<_, Option<String>>(5)?,
+                        "duration_ms": row.get::<_, i64>(6)?,
+                        "word_count": row.get::<_, i64>(7)?,
+                        "fix_count": row.get::<_, i64>(8)?,
+                    }))
+                }) {
+                    rows.filter_map(|r| r.ok()).collect()
+                } else {
+                    Vec::new()
                 }
+            } else {
+                Vec::new()
             }
+        };
+        if !list.is_empty() {
+            return list;
         }
     }
 
@@ -2550,6 +2556,7 @@ async fn process_android_audio(
                     };
                 }
             }
+        }
     };
 
     let t_stt_ms = t_stt_start.elapsed().as_millis() as u64;
