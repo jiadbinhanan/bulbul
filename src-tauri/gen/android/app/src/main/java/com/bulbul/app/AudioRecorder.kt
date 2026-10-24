@@ -42,6 +42,8 @@ import kotlin.concurrent.thread
 class AudioRecorder(private val context: Context) {
 
     @Volatile private var recording = false
+    @Volatile var amplitude: Float = 0f
+        private set
     private var thread: Thread? = null
     private var record: AudioRecord? = null
     private var noiseSuppressor: NoiseSuppressor? = null
@@ -118,6 +120,7 @@ class AudioRecorder(private val context: Context) {
         attachEffects(r.audioSessionId)
         pcm = ByteArrayOutputStream()
         recording = true
+        amplitude = 0f
         r.startRecording()
 
         thread = thread(name = "BulbulAudioReader", isDaemon = true) {
@@ -131,11 +134,20 @@ class AudioRecorder(private val context: Context) {
                 }
                 if (n > 0) {
                     synchronized(pcm) { pcm.write(buf, 0, n) }
+                    var sum = 0.0
+                    val samples = n / 2
+                    for (i in 0 until n - 1 step 2) {
+                        val sample = ((buf[i + 1].toInt() shl 8) or (buf[i].toInt() and 0xFF)).toShort()
+                        sum += sample * sample
+                    }
+                    val rms = if (samples > 0) Math.sqrt(sum / samples) else 0.0
+                    amplitude = (rms / 8000.0).toFloat().coerceIn(0f, 1f)
                 } else if (n < 0) {
                     Log.w(TAG, "AudioRecord.read returned error $n")
                     break
                 }
             }
+            amplitude = 0f
         }
         Log.i(TAG, "recording started")
         return true

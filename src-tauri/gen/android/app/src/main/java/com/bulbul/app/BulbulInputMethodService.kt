@@ -102,11 +102,15 @@ import androidx.lifecycle.setViewTreeLifecycleOwner
 import androidx.lifecycle.setViewTreeViewModelStoreOwner
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryController
+import android.view.HapticFeedbackConstants
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.ui.platform.LocalView
 import androidx.savedstate.SavedStateRegistryOwner
 import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -114,6 +118,23 @@ enum class VoiceKeyboardState {
     IDLE,
     RECORDING,
     PROCESSING
+}
+
+enum class DeckMode {
+    VOICE,
+    TYPING
+}
+
+enum class TypingLayoutMode {
+    QWERTY,
+    BENGALI,
+    NUM_SYMBOLS
+}
+
+enum class ShiftState {
+    OFF,
+    ONCE,
+    CAPS_LOCK
 }
 
 data class ContextModePreset(
@@ -178,6 +199,8 @@ class BulbulInputMethodService : InputMethodService(),
 
     // State
     private val keyboardState = mutableStateOf(VoiceKeyboardState.IDLE)
+    private val deckModeState = mutableStateOf(DeckMode.VOICE)
+    private val audioAmplitudeState = mutableFloatStateOf(0f)
     private val activeContextModeId = mutableLongStateOf(1L)
     private val activeLanguage = mutableStateOf("auto")
     private val statusMessage = mutableStateOf<String?>(null)
@@ -302,6 +325,8 @@ class BulbulInputMethodService : InputMethodService(),
                 BulbulKeyboardTheme {
                     BulbulKeyboardScreen(
                         state = keyboardState.value,
+                        deckMode = deckModeState.value,
+                        audioAmplitude = audioAmplitudeState.floatValue,
                         contextModeId = activeContextModeId.longValue,
                         language = activeLanguage.value,
                         phase1Mode = phase1ModeState.value,
@@ -316,6 +341,12 @@ class BulbulInputMethodService : InputMethodService(),
                         vocabProfiles = vocabProfilesState.value,
                         contextModes = contextModesState.value,
                         onMicTap = { handleMicToggle() },
+                        onToggleDeckMode = {
+                            deckModeState.value = if (deckModeState.value == DeckMode.VOICE) DeckMode.TYPING else DeckMode.VOICE
+                        },
+                        onCharTap = { char ->
+                            currentInputConnection?.commitText(char, 1)
+                        },
                         onContextModeSelected = { modeId ->
                             activeContextModeId.longValue = modeId
                         },
@@ -400,6 +431,13 @@ class BulbulInputMethodService : InputMethodService(),
             keyboardState.value = VoiceKeyboardState.RECORDING
             val sel = selectedTextState.value
             statusMessage.value = if (sel.isNotBlank()) "Speak command for selection..." else "Listening..."
+            serviceScope.launch {
+                while (keyboardState.value == VoiceKeyboardState.RECORDING) {
+                    audioAmplitudeState.floatValue = recorder?.amplitude ?: 0f
+                    delay(50)
+                }
+                audioAmplitudeState.floatValue = 0f
+            }
         } else {
             statusMessage.value = "Could not start mic"
             Toast.makeText(this, "Microphone unavailable", Toast.LENGTH_SHORT).show()
@@ -409,6 +447,7 @@ class BulbulInputMethodService : InputMethodService(),
     private fun stopRecordingAndProcess() {
         val r = recorder ?: return
         keyboardState.value = VoiceKeyboardState.PROCESSING
+        audioAmplitudeState.floatValue = 0f
         statusMessage.value = "Polishing with AI..."
 
         val selected = selectedTextState.value
@@ -650,6 +689,7 @@ class BulbulInputMethodService : InputMethodService(),
             recorder?.stopRawPcm()
         } catch (_: Throwable) {}
         keyboardState.value = VoiceKeyboardState.IDLE
+        audioAmplitudeState.floatValue = 0f
         statusMessage.value = null
     }
 
@@ -747,6 +787,8 @@ fun BulbulKeyboardTheme(content: @Composable () -> Unit) {
 @Composable
 fun BulbulKeyboardScreen(
     state: VoiceKeyboardState,
+    deckMode: DeckMode,
+    audioAmplitude: Float,
     contextModeId: Long,
     language: String,
     phase1Mode: String,
@@ -761,6 +803,8 @@ fun BulbulKeyboardScreen(
     vocabProfiles: List<VocabProfileItem>,
     contextModes: List<ContextModeItem>,
     onMicTap: () -> Unit,
+    onToggleDeckMode: () -> Unit,
+    onCharTap: (String) -> Unit,
     onContextModeSelected: (Long) -> Unit,
     onLanguageSelected: (String) -> Unit,
     onPhase1ModeToggle: () -> Unit,
@@ -793,12 +837,14 @@ fun BulbulKeyboardScreen(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 6.dp),
+                .padding(horizontal = 8.dp, vertical = 5.dp),
             verticalArrangement = Arrangement.Top,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Milestone 5: Full Live Control Ribbon
+            // Milestone 5 + FlorisBoard: Full Live Control Ribbon with Deck Switcher
             LiveControlRibbon(
+                deckMode = deckMode,
+                onToggleDeckMode = onToggleDeckMode,
                 contextModeId = contextModeId,
                 language = language,
                 phase1Mode = phase1Mode,
@@ -823,8 +869,8 @@ fun BulbulKeyboardScreen(
                     onItemClick = onHistoryItemClicked,
                     onClose = onToggleHistoryDrawer
                 )
-            } else {
-                // Milestone 5: Selection Action Bar (when text is highlighted in target app)
+            } else if (deckMode == DeckMode.VOICE) {
+                // Deck A: Voice Dictation & AI Command Deck
                 if (selectedText.isNotBlank()) {
                     SelectionActionBar(
                         selectedText = selectedText,
@@ -834,10 +880,11 @@ fun BulbulKeyboardScreen(
 
                 Spacer(modifier = Modifier.height(4.dp))
 
-                // Center Dictation Hero Button
+                // Center Dictation Hero Button with live reactive audio waveform ripple
                 VoiceHeroButton(
                     state = state,
                     statusMessage = statusMessage,
+                    audioAmplitude = audioAmplitude,
                     onMicTap = onMicTap
                 )
 
@@ -852,15 +899,15 @@ fun BulbulKeyboardScreen(
                     )
                 }
 
-                // Milestone 5: Macro Editing Row
+                // Macro Editing Row
                 MacroEditingRow(onMacroAction = onMacroAction)
 
-                // Milestone 5: Bilingual Punctuation Row
+                // Bilingual Punctuation Row
                 BilingualPunctuationRow(onPunctuationTap = onPunctuationTap)
 
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
-                // Bottom Utilities Bar with Swipe Spacebar
+                // Bottom Utilities Bar with Swipe Spacebar & Keyboard Switch
                 KeyboardBottomBar(
                     onSpace = onSpace,
                     onBackspace = onBackspace,
@@ -868,7 +915,25 @@ fun BulbulKeyboardScreen(
                     onCursorMoveLeft = onCursorMoveLeft,
                     onCursorMoveRight = onCursorMoveRight,
                     onSwitchKeyboard = onSwitchKeyboard,
-                    onOpenSettings = onOpenSettings
+                    onOpenSettings = onOpenSettings,
+                    onSwitchToTyping = onToggleDeckMode
+                )
+            } else {
+                // Deck B: FlorisBoard-Inspired Full Virtual Typing Deck (QWERTY / Bengali / NumSymbols)
+                TypingDeckView(
+                    onCharTap = onCharTap,
+                    onSpace = onSpace,
+                    onBackspace = onBackspace,
+                    onAction = onAction,
+                    onCursorMoveLeft = onCursorMoveLeft,
+                    onCursorMoveRight = onCursorMoveRight,
+                    onSwitchKeyboard = onSwitchKeyboard,
+                    onVoiceTap = {
+                        onToggleDeckMode()
+                        if (state == VoiceKeyboardState.IDLE) {
+                            onMicTap()
+                        }
+                    }
                 )
             }
         }
@@ -878,6 +943,8 @@ fun BulbulKeyboardScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun LiveControlRibbon(
+    deckMode: DeckMode,
+    onToggleDeckMode: () -> Unit,
     contextModeId: Long,
     language: String,
     phase1Mode: String,
@@ -928,6 +995,27 @@ private fun LiveControlRibbon(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        // 0. Deck Switcher Pill (Voice vs Typing)
+        FilterChip(
+            selected = deckMode == DeckMode.TYPING,
+            onClick = onToggleDeckMode,
+            label = {
+                Text(
+                    if (deckMode == DeckMode.VOICE) "⌨️ Type" else "🎙️ Voice",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            colors = FilterChipDefaults.filterChipColors(
+                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                selectedLabelColor = Color.White,
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                labelColor = MaterialTheme.colorScheme.primary
+            ),
+            border = null,
+            shape = RoundedCornerShape(14.dp)
+        )
+
         // 1. Context Mode Chip
         Box {
             FilterChip(
@@ -1513,12 +1601,13 @@ private fun MiniHistoryDrawer(
 private fun VoiceHeroButton(
     state: VoiceKeyboardState,
     statusMessage: String?,
+    audioAmplitude: Float,
     onMicTap: () -> Unit
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "pulseTransition")
     val pulseScale by infiniteTransition.animateFloat(
         initialValue = 1f,
-        targetValue = 1.22f,
+        targetValue = 1.18f,
         animationSpec = infiniteRepeatable(
             animation = tween(650, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse
@@ -1535,22 +1624,37 @@ private fun VoiceHeroButton(
         label = "buttonColorAnim"
     )
 
+    val dynamicPulse = if (state == VoiceKeyboardState.RECORDING) {
+        pulseScale + (audioAmplitude * 0.35f)
+    } else {
+        1f
+    }
+
     Column(
         modifier = Modifier.padding(vertical = 2.dp),
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
-            modifier = Modifier.size(80.dp),
+            modifier = Modifier.size(86.dp),
             contentAlignment = Alignment.Center
         ) {
             if (state == VoiceKeyboardState.RECORDING) {
+                // Outer amplitude ripple ring
                 Box(
                     modifier = Modifier
-                        .size(76.dp)
-                        .scale(pulseScale)
+                        .size(80.dp)
+                        .scale(dynamicPulse * 1.12f)
                         .clip(CircleShape)
-                        .background(Color(0xFFEF4444).copy(alpha = 0.25f))
+                        .background(Color(0xFFEF4444).copy(alpha = 0.15f + audioAmplitude * 0.2f))
+                )
+                // Inner pulsating ring
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .scale(dynamicPulse)
+                        .clip(CircleShape)
+                        .background(Color(0xFFEF4444).copy(alpha = 0.28f + audioAmplitude * 0.25f))
                 )
             }
 
@@ -1624,19 +1728,20 @@ private fun KeyboardBottomBar(
     onCursorMoveLeft: () -> Unit,
     onCursorMoveRight: () -> Unit,
     onSwitchKeyboard: () -> Unit,
-    onOpenSettings: () -> Unit
+    onOpenSettings: () -> Unit,
+    onSwitchToTyping: () -> Unit
 ) {
     var dragAccumulator by remember { mutableFloatStateOf(0f) }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         // Switch Keyboard (Globe)
         IconButton(
             onClick = onSwitchKeyboard,
-            modifier = Modifier.size(42.dp),
+            modifier = Modifier.size(40.dp),
             colors = IconButtonDefaults.iconButtonColors(
                 containerColor = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1645,7 +1750,23 @@ private fun KeyboardBottomBar(
             Icon(
                 imageVector = Icons.Default.Language,
                 contentDescription = "Switch Keyboard",
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(19.dp)
+            )
+        }
+
+        // Switch to Virtual Typing Deck Button (FlorisBoard dual-deck)
+        IconButton(
+            onClick = onSwitchToTyping,
+            modifier = Modifier.size(40.dp),
+            colors = IconButtonDefaults.iconButtonColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = MaterialTheme.colorScheme.primary
+            )
+        ) {
+            Icon(
+                imageVector = Icons.Default.Keyboard,
+                contentDescription = "Switch to Typing Keyboard",
+                modifier = Modifier.size(19.dp)
             )
         }
 
@@ -1678,7 +1799,7 @@ private fun KeyboardBottomBar(
         ) {
             Text(
                 "Space  ⇄",
-                fontSize = 13.sp,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurface
             )
@@ -1687,7 +1808,7 @@ private fun KeyboardBottomBar(
         // Backspace
         IconButton(
             onClick = onBackspace,
-            modifier = Modifier.size(42.dp),
+            modifier = Modifier.size(40.dp),
             colors = IconButtonDefaults.iconButtonColors(
                 containerColor = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1696,14 +1817,14 @@ private fun KeyboardBottomBar(
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.Backspace,
                 contentDescription = "Backspace",
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(19.dp)
             )
         }
 
         // Action / Enter
         IconButton(
             onClick = onAction,
-            modifier = Modifier.size(42.dp),
+            modifier = Modifier.size(40.dp),
             colors = IconButtonDefaults.iconButtonColors(
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary
@@ -1712,14 +1833,14 @@ private fun KeyboardBottomBar(
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.Send,
                 contentDescription = "Action / Enter",
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(19.dp)
             )
         }
 
         // Settings Shortcut
         IconButton(
             onClick = onOpenSettings,
-            modifier = Modifier.size(42.dp),
+            modifier = Modifier.size(40.dp),
             colors = IconButtonDefaults.iconButtonColors(
                 containerColor = MaterialTheme.colorScheme.surfaceVariant,
                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1728,8 +1849,498 @@ private fun KeyboardBottomBar(
             Icon(
                 imageVector = Icons.Default.Settings,
                 contentDescription = "Settings",
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(19.dp)
             )
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FlorisBoard-Inspired Full Virtual Typing Deck & Modular Key Composables
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun KeyCap(
+    text: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { onClick() },
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(8.dp),
+        tonalElevation = 2.dp
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                text = text,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
+}
+
+@Composable
+private fun KeyRow(
+    keys: List<String>,
+    shiftState: ShiftState,
+    onKeyClick: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        keys.forEach { key ->
+            val display = if (shiftState != ShiftState.OFF) key.uppercase() else key.lowercase()
+            KeyCap(
+                text = display,
+                modifier = Modifier.weight(1f),
+                onClick = { onKeyClick(key) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun BengaliKeyRow(
+    keys: List<String>,
+    onKeyClick: (String) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        keys.forEach { key ->
+            KeyCap(
+                text = key,
+                modifier = Modifier.weight(1f),
+                onClick = { onKeyClick(key) }
+            )
+        }
+    }
+}
+
+@Composable
+fun TypingDeckView(
+    onCharTap: (String) -> Unit,
+    onSpace: () -> Unit,
+    onBackspace: () -> Unit,
+    onAction: () -> Unit,
+    onCursorMoveLeft: () -> Unit,
+    onCursorMoveRight: () -> Unit,
+    onSwitchKeyboard: () -> Unit,
+    onVoiceTap: () -> Unit
+) {
+    var layoutMode by remember { mutableStateOf(TypingLayoutMode.QWERTY) }
+    var shiftState by remember { mutableStateOf(ShiftState.OFF) }
+    val view = LocalView.current
+
+    val hapticTap = {
+        try {
+            view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        } catch (_: Throwable) {}
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        when (layoutMode) {
+            TypingLayoutMode.QWERTY -> {
+                val row1 = listOf("q", "w", "e", "r", "t", "y", "u", "i", "o", "p")
+                KeyRow(keys = row1, shiftState = shiftState, onKeyClick = {
+                    hapticTap()
+                    val char = if (shiftState != ShiftState.OFF) it.uppercase() else it.lowercase()
+                    onCharTap(char)
+                    if (shiftState == ShiftState.ONCE) shiftState = ShiftState.OFF
+                })
+
+                val row2 = listOf("a", "s", "d", "f", "g", "h", "j", "k", "l")
+                KeyRow(keys = row2, shiftState = shiftState, onKeyClick = {
+                    hapticTap()
+                    val char = if (shiftState != ShiftState.OFF) it.uppercase() else it.lowercase()
+                    onCharTap(char)
+                    if (shiftState == ShiftState.ONCE) shiftState = ShiftState.OFF
+                })
+
+                val row3 = listOf("z", "x", "c", "v", "b", "n", "m")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Shift Key
+                    Surface(
+                        modifier = Modifier
+                            .weight(1.4f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                hapticTap()
+                                shiftState = when (shiftState) {
+                                    ShiftState.OFF -> ShiftState.ONCE
+                                    ShiftState.ONCE -> ShiftState.CAPS_LOCK
+                                    ShiftState.CAPS_LOCK -> ShiftState.OFF
+                                }
+                            },
+                        color = if (shiftState != ShiftState.OFF) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(8.dp),
+                        tonalElevation = 2.dp
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = when (shiftState) {
+                                    ShiftState.OFF -> "⇧"
+                                    ShiftState.ONCE -> "⬆"
+                                    ShiftState.CAPS_LOCK -> "⇪"
+                                },
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (shiftState != ShiftState.OFF) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+
+                    row3.forEach { key ->
+                        KeyCap(
+                            text = if (shiftState != ShiftState.OFF) key.uppercase() else key.lowercase(),
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                hapticTap()
+                                val char = if (shiftState != ShiftState.OFF) key.uppercase() else key.lowercase()
+                                onCharTap(char)
+                                if (shiftState == ShiftState.ONCE) shiftState = ShiftState.OFF
+                            }
+                        )
+                    }
+
+                    // Backspace Key
+                    Surface(
+                        modifier = Modifier
+                            .weight(1.4f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable {
+                                hapticTap()
+                                onBackspace()
+                            },
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(8.dp),
+                        tonalElevation = 2.dp
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Backspace,
+                                contentDescription = "Backspace",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            TypingLayoutMode.BENGALI -> {
+                val bnRow1 = listOf("ক", "খ", "গ", "ঘ", "ঙ", "চ", "ছ", "জ", "ঝ", "ঞ")
+                val bnRow2 = listOf("ট", "ঠ", "ড", "ঢ", "ণ", "ত", "থ", "দ", "ধ", "ন")
+                val bnRow3 = listOf("প", "ফ", "ব", "ভ", "ম", "য", "র", "ল", "শ", "স")
+                val bnRow4 = listOf("া", "ি", "ী", "ু", "ূ", "ে", "ৈ", "ো", "ৌ", "্", "ৎ", "ং", "ঃ", "ঁ")
+
+                BengaliKeyRow(keys = bnRow1, onKeyClick = { hapticTap(); onCharTap(it) })
+                BengaliKeyRow(keys = bnRow2, onKeyClick = { hapticTap(); onCharTap(it) })
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    bnRow3.forEach { key ->
+                        KeyCap(
+                            text = key,
+                            modifier = Modifier.weight(1f),
+                            onClick = { hapticTap(); onCharTap(key) }
+                        )
+                    }
+                    Surface(
+                        modifier = Modifier
+                            .weight(1.3f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { hapticTap(); onBackspace() },
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(8.dp),
+                        tonalElevation = 2.dp
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Backspace,
+                                contentDescription = "Backspace",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    bnRow4.forEach { sign ->
+                        Surface(
+                            modifier = Modifier
+                                .height(38.dp)
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { hapticTap(); onCharTap(sign) },
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = RoundedCornerShape(6.dp),
+                            tonalElevation = 2.dp
+                        ) {
+                            Box(modifier = Modifier.padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = sign,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            TypingLayoutMode.NUM_SYMBOLS -> {
+                val numRow1 = listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0")
+                val numRow2 = listOf("@", "#", "$", "%", "&", "-", "+", "(", ")", "/")
+                val numRow3 = listOf("=", "*", "\"", "'", ":", ";", "!", "?")
+
+                KeyRow(keys = numRow1, shiftState = ShiftState.OFF, onKeyClick = { hapticTap(); onCharTap(it) })
+                KeyRow(keys = numRow2, shiftState = ShiftState.OFF, onKeyClick = { hapticTap(); onCharTap(it) })
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    numRow3.forEach { key ->
+                        KeyCap(
+                            text = key,
+                            modifier = Modifier.weight(1f),
+                            onClick = { hapticTap(); onCharTap(key) }
+                        )
+                    }
+                    Surface(
+                        modifier = Modifier
+                            .weight(1.4f)
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { hapticTap(); onBackspace() },
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        shape = RoundedCornerShape(8.dp),
+                        tonalElevation = 2.dp
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Backspace,
+                                contentDescription = "Backspace",
+                                modifier = Modifier.size(20.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Bottom Bar of Typing Deck
+        var dragAccumulator by remember { mutableFloatStateOf(0f) }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // ?123 / ABC Toggle
+            Surface(
+                modifier = Modifier
+                    .weight(1.3f)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        hapticTap()
+                        layoutMode = if (layoutMode == TypingLayoutMode.NUM_SYMBOLS) {
+                            TypingLayoutMode.QWERTY
+                        } else {
+                            TypingLayoutMode.NUM_SYMBOLS
+                        }
+                    },
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(8.dp),
+                tonalElevation = 2.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = if (layoutMode == TypingLayoutMode.NUM_SYMBOLS) "ABC" else "?123",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            // বাংলা / EN Toggle
+            Surface(
+                modifier = Modifier
+                    .weight(1.3f)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        hapticTap()
+                        layoutMode = if (layoutMode == TypingLayoutMode.BENGALI) {
+                            TypingLayoutMode.QWERTY
+                        } else {
+                            TypingLayoutMode.BENGALI
+                        }
+                    },
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(8.dp),
+                tonalElevation = 2.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = if (layoutMode == TypingLayoutMode.BENGALI) "EN" else "বাং",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            // Quick Voice Trigger
+            Surface(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .clickable {
+                        hapticTap()
+                        onVoiceTap()
+                    },
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shape = CircleShape,
+                tonalElevation = 2.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.Mic,
+                        contentDescription = "Quick Voice",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            }
+
+            // Spacebar with Swipe Cursor Control
+            Box(
+                modifier = Modifier
+                    .weight(3.5f)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .pointerInput(Unit) {
+                        detectHorizontalDragGestures(
+                            onDragStart = { dragAccumulator = 0f },
+                            onHorizontalDrag = { _, dragAmount ->
+                                dragAccumulator += dragAmount
+                                val thresholdPx = 28f
+                                while (dragAccumulator > thresholdPx) {
+                                    onCursorMoveRight()
+                                    dragAccumulator -= thresholdPx
+                                }
+                                while (dragAccumulator < -thresholdPx) {
+                                    onCursorMoveLeft()
+                                    dragAccumulator += thresholdPx
+                                }
+                            }
+                        )
+                    }
+                    .clickable {
+                        hapticTap()
+                        onSpace()
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = when (layoutMode) {
+                        TypingLayoutMode.BENGALI -> "স্পেস  ⇄"
+                        TypingLayoutMode.NUM_SYMBOLS -> "Space  ⇄"
+                        else -> "Space  ⇄"
+                    },
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            // Period / Bengali Dari
+            Surface(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        hapticTap()
+                        val punct = if (layoutMode == TypingLayoutMode.BENGALI) "।" else "."
+                        onCharTap(punct)
+                    },
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(8.dp),
+                tonalElevation = 2.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = if (layoutMode == TypingLayoutMode.BENGALI) "।" else ".",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+
+            // Enter / Action Key
+            Surface(
+                modifier = Modifier
+                    .weight(1.4f)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable {
+                        hapticTap()
+                        onAction()
+                    },
+                color = MaterialTheme.colorScheme.primary,
+                shape = RoundedCornerShape(8.dp),
+                tonalElevation = 4.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Send",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                }
+            }
         }
     }
 }

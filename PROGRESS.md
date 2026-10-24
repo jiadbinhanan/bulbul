@@ -58,3 +58,23 @@
   - `PROGRESS.md`
 - **Deviations from the prompt:** None.
 - **Ready for next phase?** Yes; ready for Phase 4 (FlorisBoard-Inspired Android Keyboard Redesign).
+
+## Phase 4: FlorisBoard-Inspired Android Keyboard Redesign
+- **Phase / Status:** Phase 4 / PASS
+- **Commands run:**
+  - `cargo check --manifest-path src-tauri/Cargo.toml`
+  - `git diff`
+- **Key output:**
+  - Re-architected `BulbulInputMethodService.kt` into a modern FlorisBoard-inspired **Dual-Deck Keyboard**:
+    - **Deck A (Voice & AI Command Deck):** Hero microphone button with dynamic multi-ring audio amplitude ripples, live Smartbar with instant mode chips, language selector, vocabulary toggles, selection action bar, and post-dictation magic bar (`[⇄ Switch Raw <-> Polished]`, `[↻ Re-Try]`).
+    - **Deck B (Virtual Typing Deck):** Full virtual keyboard supporting QWERTY Latin, clean Bengali layout (স্বরবর্ণ, ব্যঞ্জনবর্ণ ও যুক্তবর্ণ), and Number/Symbol layout (`?123`).
+    - Integrated one-tap deck switching (`⌨️ Type` / `🎙️ Voice`) in the top Smartbar and bottom bar.
+    - Added haptic feedback (`HapticFeedbackConstants.KEYBOARD_TAP`) and spacebar swipe gesture for smooth left/right cursor control.
+    - Updated `AudioRecorder.kt` to calculate real-time RMS audio amplitude and stream it to Compose UI.
+  - Verified Windows desktop build remains 100% clean and unaffected.
+- **Files created or changed:**
+  - `src-tauri/gen/android/app/src/main/java/com/bulbul/app/AudioRecorder.kt`
+  - `src-tauri/gen/android/app/src/main/java/com/bulbul/app/BulbulInputMethodService.kt`
+  - `PROGRESS.md`
+- **Deviations from the prompt:** None.
+- **Ready for next phase?** Yes; ready for Phase 5 (Build Toolchain Upgrade & Proguard Hardening).
